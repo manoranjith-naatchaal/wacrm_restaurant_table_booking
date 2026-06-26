@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
@@ -11,6 +11,11 @@ import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
 } from '@/lib/whatsapp/template-webhook'
+
+// Inbound processing (media download + flow/automation dispatch) runs
+// in `after()` past the response; give it headroom beyond the default
+// serverless function timeout. Lower this if your hosting plan caps it.
+export const maxDuration = 60
 
 // Lazy-initialized to avoid build-time crash when env vars are missing
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -127,18 +132,20 @@ export async function GET(request: Request) {
       // Fire-and-forget GCM upgrade. Safe to run on every subscribe
       // since it's a no-op once the column is already GCM.
       if (isLegacyFormat(matchedConfig.verify_token)) {
-        void supabaseAdmin()
-          .from('whatsapp_config')
-          .update({ verify_token: encrypt(verifyToken) })
-          .eq('id', matchedConfig.id)
-          .then(({ error }: { error: unknown }) => {
-            if (error) {
-              console.warn(
-                '[webhook] verify_token GCM upgrade failed:',
-                (error as { message?: string })?.message ?? error,
-              )
-            }
-          })
+        after(() =>
+          supabaseAdmin()
+            .from('whatsapp_config')
+            .update({ verify_token: encrypt(verifyToken) })
+            .eq('id', matchedConfig.id)
+            .then(({ error }: { error: unknown }) => {
+              if (error) {
+                console.warn(
+                  '[webhook] verify_token GCM upgrade failed:',
+                  (error as { message?: string })?.message ?? error,
+                )
+              }
+            }),
+        )
       }
       // Return challenge as plain text
       return new Response(challenge, {
@@ -182,10 +189,18 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  // Process asynchronously so we can ack Meta within their timeout.
-  processWebhook(body).catch((error) => {
-    console.error('Error processing webhook:', error)
-  })
+  // Ack Meta within their timeout, but run the actual processing via
+  // `after()` so it survives past the response. A bare fire-and-forget
+  // (`processWebhook(body)` without awaiting) gets frozen/killed the
+  // moment we return on serverless platforms like Vercel — severing
+  // in-flight Supabase writes mid-request (UND_ERR_SOCKET "other side
+  // closed") and silently dropping inbound messages. `after()` keeps
+  // the function alive until processing finishes.
+  after(() =>
+    processWebhook(body).catch((error) => {
+      console.error('Error processing webhook:', error)
+    }),
+  )
 
   return NextResponse.json({ status: 'received' }, { status: 200 })
 }
