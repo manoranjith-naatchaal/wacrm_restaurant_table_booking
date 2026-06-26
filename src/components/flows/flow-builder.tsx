@@ -567,6 +567,10 @@ function AddNodeButton({ onAdd }: { onAdd: (type: NodeType) => void }) {
     "collect_input",
     "condition",
     "set_tag",
+    "pick_date",
+    "check_availability",
+    "create_reservation",
+    "show_menu",
     "handoff",
     "end",
   ];

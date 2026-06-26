@@ -20,13 +20,18 @@
  */
 
 import type {
+  CheckAvailabilityNodeConfig,
   CollectInputNodeConfig,
   ConditionNodeConfig,
+  CreateReservationNodeConfig,
   HandoffNodeConfig,
   KeywordTriggerConfig,
+  PickDateNodeConfig,
   SendButtonsNodeConfig,
   SendListNodeConfig,
+  SendMediaNodeConfig,
   SendMessageNodeConfig,
+  ShowMenuNodeConfig,
   StartNodeConfig,
 } from "./types";
 
@@ -35,9 +40,14 @@ export type FlowTemplateNodeType =
   | "send_message"
   | "send_buttons"
   | "send_list"
+  | "send_media"
   | "collect_input"
   | "condition"
   | "set_tag"
+  | "pick_date"
+  | "check_availability"
+  | "create_reservation"
+  | "show_menu"
   | "handoff"
   | "end";
 
@@ -49,8 +59,13 @@ export interface FlowTemplateNode {
     | SendMessageNodeConfig
     | SendButtonsNodeConfig
     | SendListNodeConfig
+    | SendMediaNodeConfig
     | CollectInputNodeConfig
     | ConditionNodeConfig
+    | PickDateNodeConfig
+    | CheckAvailabilityNodeConfig
+    | CreateReservationNodeConfig
+    | ShowMenuNodeConfig
     | HandoffNodeConfig
     | Record<string, unknown>;
 }
@@ -60,7 +75,12 @@ export interface FlowTemplate {
   name: string;
   description: string;
   /** Used by the gallery to surface a relevant icon. lucide-react name. */
-  icon: "MessageSquare" | "HelpCircle" | "UserPlus";
+  icon:
+    | "MessageSquare"
+    | "HelpCircle"
+    | "UserPlus"
+    | "CalendarCheck"
+    | "UtensilsCrossed";
   trigger_type: "keyword" | "first_inbound_message" | "manual";
   trigger_config: KeywordTriggerConfig | Record<string, unknown>;
   entry_node_id: string;
@@ -286,6 +306,404 @@ const LEAD_CAPTURE: FlowTemplate = {
 };
 
 // ============================================================
+// 4. Book a table — WhatsApp booking via the booking nodes
+// ============================================================
+const BOOK_A_TABLE: FlowTemplate = {
+  slug: "book_a_table",
+  name: "Book a table",
+  description:
+    "Let guests book over WhatsApp: ask party size, offer Today/Tomorrow, show open times, confirm, and create the reservation — no agent needed.",
+  icon: "CalendarCheck",
+  trigger_type: "keyword",
+  trigger_config: {
+    keywords: ["book", "booking", "reserve", "table"],
+    match_type: "contains",
+  },
+  entry_node_id: "start",
+  nodes: [
+    {
+      node_key: "start",
+      node_type: "start",
+      config: { next_node_key: "ask_party" },
+    },
+    {
+      node_key: "ask_party",
+      node_type: "send_buttons",
+      config: {
+        text: "Hi! 🍽️ Let's get your table booked. How many guests?",
+        capture_var: "party_size",
+        buttons: [
+          { reply_id: "2", title: "2 guests", next_node_key: "pick_day" },
+          { reply_id: "4", title: "4 guests", next_node_key: "pick_day" },
+          { reply_id: "6", title: "6 guests", next_node_key: "pick_day" },
+        ],
+      } as SendButtonsNodeConfig,
+    },
+    {
+      node_key: "pick_day",
+      node_type: "pick_date",
+      config: {
+        text: "Great! Which day would you like to come in?",
+        days_to_offer: 2,
+        output_var: "booking_date",
+        next_node_key: "show_times",
+      } as PickDateNodeConfig,
+    },
+    {
+      node_key: "show_times",
+      node_type: "check_availability",
+      config: {
+        date_var: "booking_date",
+        text: "Here are the available times. Tap one to continue:",
+        button_label: "View times",
+        slot_interval_minutes: 30,
+        max_options: 10,
+        output_var: "booking_time",
+        next_node_key: "ask_name",
+      } as CheckAvailabilityNodeConfig,
+    },
+    {
+      node_key: "ask_name",
+      node_type: "collect_input",
+      config: {
+        prompt_text: "And your name for the reservation?",
+        var_key: "guest_name",
+        next_node_key: "confirm",
+      } as CollectInputNodeConfig,
+    },
+    {
+      node_key: "confirm",
+      node_type: "send_buttons",
+      config: {
+        text: "Please confirm — {{vars.guest_name}}, {{vars.party_size}} guests on {{vars.booking_date}} at {{vars.booking_time}}.",
+        buttons: [
+          { reply_id: "yes", title: "Confirm", next_node_key: "book" },
+          { reply_id: "no", title: "Start over", next_node_key: "ask_party" },
+        ],
+      } as SendButtonsNodeConfig,
+    },
+    {
+      node_key: "book",
+      node_type: "create_reservation",
+      config: {
+        date_var: "booking_date",
+        time_var: "booking_time",
+        party_size_var: "party_size",
+        guest_name_var: "guest_name",
+        reservation_status: "pending",
+        notes_template: "Booked via WhatsApp",
+        success_next: "done",
+      } as CreateReservationNodeConfig,
+    },
+    {
+      node_key: "done",
+      node_type: "send_message",
+      config: {
+        text: "🎉 You're booked, {{vars.guest_name}}! Table for {{vars.party_size}} on {{vars.booking_date}} at {{vars.booking_time}}. See you soon!",
+        next_node_key: "end",
+      } as SendMessageNodeConfig,
+    },
+    {
+      node_key: "end",
+      node_type: "end",
+      config: {},
+    },
+  ],
+};
+
+// ============================================================
+// 5. Restaurant hub — one keyword, a menu of everything: book a
+//    table, order online, view the menu, or get FAQ answers.
+//    Built entirely from existing blocks.
+// ============================================================
+const RESTAURANT_HUB: FlowTemplate = {
+  slug: "restaurant_hub",
+  name: "Restaurant hub",
+  description:
+    "One keyword opens a welcome message + menu of options: book a table, order online (Swiggy/Zomato links), view the menu, or browse FAQs. Replace the welcome image and links with your own.",
+  icon: "UtensilsCrossed",
+  trigger_type: "keyword",
+  trigger_config: {
+    keywords: ["hi", "hello", "menu", "start"],
+    match_type: "contains",
+  },
+  entry_node_id: "start",
+  nodes: [
+    {
+      node_key: "start",
+      node_type: "start",
+      config: { next_node_key: "welcome" },
+    },
+    // Welcome media — replace the placeholder image with your own
+    // (upload it in the builder). The caption is the welcome message.
+    {
+      node_key: "welcome",
+      node_type: "send_media",
+      config: {
+        media_type: "image",
+        media_url: "https://placehold.co/1080x720/png?text=Welcome",
+        caption:
+          "👋 Welcome to our restaurant! How can we help you today?",
+        next_node_key: "main_menu",
+      } as SendMediaNodeConfig,
+    },
+    // Main menu — the hub everything routes back to.
+    {
+      node_key: "main_menu",
+      node_type: "send_list",
+      config: {
+        text: "Please choose an option:",
+        button_label: "View options",
+        sections: [
+          {
+            title: "How can we help?",
+            rows: [
+              {
+                reply_id: "book",
+                title: "Book a table",
+                description: "Reserve a table over WhatsApp",
+                next_node_key: "ask_party",
+              },
+              {
+                reply_id: "order",
+                title: "Order online",
+                description: "Swiggy, Zomato & more",
+                next_node_key: "order_list",
+              },
+              {
+                reply_id: "menu",
+                title: "View menu",
+                description: "See our dishes & prices",
+                next_node_key: "menu_show",
+              },
+              {
+                reply_id: "faq",
+                title: "FAQ",
+                description: "Hours, location & more",
+                next_node_key: "faq_list",
+              },
+            ],
+          },
+        ],
+      } as SendListNodeConfig,
+    },
+
+    // ---- Book a table (booking nodes) ----
+    {
+      node_key: "ask_party",
+      node_type: "send_buttons",
+      config: {
+        text: "Great! 🍽️ How many guests?",
+        capture_var: "party_size",
+        buttons: [
+          { reply_id: "2", title: "2 guests", next_node_key: "pick_day" },
+          { reply_id: "4", title: "4 guests", next_node_key: "pick_day" },
+          { reply_id: "6", title: "6 guests", next_node_key: "pick_day" },
+        ],
+      } as SendButtonsNodeConfig,
+    },
+    {
+      node_key: "pick_day",
+      node_type: "pick_date",
+      config: {
+        text: "Which day would you like to come in?",
+        days_to_offer: 2,
+        output_var: "booking_date",
+        next_node_key: "show_times",
+      } as PickDateNodeConfig,
+    },
+    {
+      node_key: "show_times",
+      node_type: "check_availability",
+      config: {
+        date_var: "booking_date",
+        text: "Here are the available times. Tap one to continue:",
+        button_label: "View times",
+        slot_interval_minutes: 30,
+        max_options: 10,
+        output_var: "booking_time",
+        next_node_key: "ask_name",
+      } as CheckAvailabilityNodeConfig,
+    },
+    {
+      node_key: "ask_name",
+      node_type: "collect_input",
+      config: {
+        prompt_text: "And your name for the reservation?",
+        var_key: "guest_name",
+        next_node_key: "confirm",
+      } as CollectInputNodeConfig,
+    },
+    {
+      node_key: "confirm",
+      node_type: "send_buttons",
+      config: {
+        text: "Please confirm — {{vars.guest_name}}, {{vars.party_size}} guests on {{vars.booking_date}} at {{vars.booking_time}}.",
+        buttons: [
+          { reply_id: "yes", title: "Confirm", next_node_key: "book" },
+          { reply_id: "no", title: "Start over", next_node_key: "ask_party" },
+        ],
+      } as SendButtonsNodeConfig,
+    },
+    {
+      node_key: "book",
+      node_type: "create_reservation",
+      config: {
+        date_var: "booking_date",
+        time_var: "booking_time",
+        party_size_var: "party_size",
+        guest_name_var: "guest_name",
+        reservation_status: "pending",
+        notes_template: "Booked via WhatsApp",
+        success_next: "booked",
+      } as CreateReservationNodeConfig,
+    },
+    {
+      node_key: "booked",
+      node_type: "send_message",
+      config: {
+        text: "🎉 You're booked, {{vars.guest_name}}! Table for {{vars.party_size}} on {{vars.booking_date}} at {{vars.booking_time}}. See you soon!",
+        next_node_key: "end",
+      } as SendMessageNodeConfig,
+    },
+
+    // ---- Order online (links via text — replace with your own) ----
+    {
+      node_key: "order_list",
+      node_type: "send_list",
+      config: {
+        text: "Where would you like to order from?",
+        button_label: "View partners",
+        sections: [
+          {
+            title: "Delivery partners",
+            rows: [
+              {
+                reply_id: "swiggy",
+                title: "Swiggy",
+                next_node_key: "order_swiggy",
+              },
+              {
+                reply_id: "zomato",
+                title: "Zomato",
+                next_node_key: "order_zomato",
+              },
+            ],
+          },
+        ],
+      } as SendListNodeConfig,
+    },
+    {
+      node_key: "order_swiggy",
+      node_type: "send_message",
+      config: {
+        text: "Order on Swiggy here 👇\nhttps://www.swiggy.com/\n\n(Replace this link with your Swiggy page.)",
+        next_node_key: "main_menu",
+      } as SendMessageNodeConfig,
+    },
+    {
+      node_key: "order_zomato",
+      node_type: "send_message",
+      config: {
+        text: "Order on Zomato here 👇\nhttps://www.zomato.com/\n\n(Replace this link with your Zomato page.)",
+        next_node_key: "main_menu",
+      } as SendMessageNodeConfig,
+    },
+
+    // ---- Menu ----
+    {
+      node_key: "menu_show",
+      node_type: "show_menu",
+      config: {
+        intro_text: "Here's our menu:",
+        include_prices: true,
+        include_descriptions: true,
+        next_node_key: "main_menu",
+      } as ShowMenuNodeConfig,
+    },
+
+    // ---- FAQ (edit these answers to match your restaurant) ----
+    {
+      node_key: "faq_list",
+      node_type: "send_list",
+      config: {
+        text: "What would you like to know?",
+        button_label: "View questions",
+        sections: [
+          {
+            title: "Common questions",
+            rows: [
+              {
+                reply_id: "hours",
+                title: "Opening hours",
+                next_node_key: "faq_hours",
+              },
+              {
+                reply_id: "location",
+                title: "Location",
+                next_node_key: "faq_location",
+              },
+              {
+                reply_id: "parking",
+                title: "Parking",
+                next_node_key: "faq_parking",
+              },
+            ],
+          },
+          {
+            title: "Other",
+            rows: [
+              {
+                reply_id: "human",
+                title: "Talk to a human",
+                next_node_key: "faq_human",
+              },
+            ],
+          },
+        ],
+      } as SendListNodeConfig,
+    },
+    {
+      node_key: "faq_hours",
+      node_type: "send_message",
+      config: {
+        text: "🕒 We're open every day, 12pm–11pm. Last orders at 10:30pm.",
+        next_node_key: "main_menu",
+      } as SendMessageNodeConfig,
+    },
+    {
+      node_key: "faq_location",
+      node_type: "send_message",
+      config: {
+        text: "📍 We're at 123 Main Street. Map: https://maps.google.com/\n\n(Replace with your address & map link.)",
+        next_node_key: "main_menu",
+      } as SendMessageNodeConfig,
+    },
+    {
+      node_key: "faq_parking",
+      node_type: "send_message",
+      config: {
+        text: "🅿️ Yes — free parking is available right next to the restaurant.",
+        next_node_key: "main_menu",
+      } as SendMessageNodeConfig,
+    },
+    {
+      node_key: "faq_human",
+      node_type: "handoff",
+      config: {
+        note: "Guest asked to talk to a human from the FAQ menu.",
+      } as HandoffNodeConfig,
+    },
+
+    {
+      node_key: "end",
+      node_type: "end",
+      config: {},
+    },
+  ],
+};
+
+// ============================================================
 // Registry
 // ============================================================
 
@@ -293,6 +711,8 @@ const TEMPLATES: Record<string, FlowTemplate> = {
   welcome_menu: WELCOME_MENU,
   faq_bot: FAQ_BOT,
   lead_capture: LEAD_CAPTURE,
+  book_a_table: BOOK_A_TABLE,
+  restaurant_hub: RESTAURANT_HUB,
 };
 
 export function getFlowTemplate(slug: string): FlowTemplate | null {

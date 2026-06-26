@@ -627,6 +627,10 @@ const ADD_NODE_TYPES: NodeType[] = [
   "collect_input",
   "condition",
   "set_tag",
+  "pick_date",
+  "check_availability",
+  "create_reservation",
+  "show_menu",
   "handoff",
   "end",
 ];

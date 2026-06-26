@@ -1,0 +1,38 @@
+name: DB Migrate
+
+# Applies Supabase migrations to the linked (production) project.
+# Runs only when migration files change on main — kept deliberately
+# separate from the app deploy so schema changes are a controlled,
+# one-time action rather than something that fires on every build.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**'
+  # Allow running it by hand from the Actions tab when needed.
+  workflow_dispatch:
+
+# Never let two migration runs overlap; don't cancel one mid-flight.
+concurrency:
+  group: db-migrate
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Apply Supabase migrations
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link project
+        run: supabase link --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
+
+      - name: Push migrations
+        run: supabase db push

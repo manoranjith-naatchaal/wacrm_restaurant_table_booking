@@ -420,6 +420,45 @@ describe("validateFlowForActivation — nodes", () => {
   });
 });
 
+describe("validateFlowForActivation — show_menu", () => {
+  const baseFlow = { ...validFlow, entry_node_id: "s" };
+  const nodesWith = (menuConfig: Record<string, unknown>) => [
+    { node_key: "s", node_type: "start", config: { next_node_key: "m" } },
+    { node_key: "m", node_type: "show_menu", config: menuConfig },
+    { node_key: "h", node_type: "handoff", config: {} },
+  ];
+
+  it("passes on a valid show_menu node (no body required)", () => {
+    const issues = validateFlowForActivation(
+      baseFlow,
+      nodesWith({ intro_text: "Menu:", next_node_key: "h" }),
+    );
+    expect(issues).toEqual([]);
+  });
+
+  it("flags a missing next_node_key", () => {
+    const issues = validateFlowForActivation(baseFlow, nodesWith({}));
+    expect(
+      issues.some((i) => i.node_key === "m" && i.field === "next_node_key"),
+    ).toBe(true);
+  });
+
+  it("flags next_node_key pointing at a non-existent node", () => {
+    const issues = validateFlowForActivation(
+      baseFlow,
+      nodesWith({ next_node_key: "ghost" }),
+    );
+    expect(
+      issues.some((i) => i.node_key === "m" && i.field === "next_node_key"),
+    ).toBe(true);
+  });
+
+  it("treats show_menu as a normal forward edge for reachability", () => {
+    const set = reachableFromEntry("s", nodesWith({ next_node_key: "h" }));
+    expect(set).toEqual(new Set(["s", "m", "h"]));
+  });
+});
+
 describe("validateFlowForActivation — send_media", () => {
   const baseFlow = { ...validFlow, entry_node_id: "s" };
   const nodesWith = (mediaConfig: Record<string, unknown>) => [
@@ -545,5 +584,253 @@ describe("reachableFromEntry", () => {
     ];
     const set = reachableFromEntry("a", nodes);
     expect(set).toEqual(new Set(["a", "b"]));
+  });
+});
+
+// ============================================================
+// Booking nodes (pick_date / check_availability / create_reservation)
+// ============================================================
+
+const bookingFlow = {
+  name: "Book a table",
+  trigger_type: "keyword" as const,
+  trigger_config: { keywords: ["book"] },
+  entry_node_id: "s",
+};
+
+/** A well-formed booking graph; override one node's config per test. */
+function bookingNodes(
+  overrides: {
+    pd?: Record<string, unknown>;
+    ca?: Record<string, unknown>;
+    cr?: Record<string, unknown>;
+  } = {},
+) {
+  return [
+    { node_key: "s", node_type: "start", config: { next_node_key: "pd" } },
+    {
+      node_key: "pd",
+      node_type: "pick_date",
+      config: overrides.pd ?? {
+        text: "Which day?",
+        days_to_offer: 2,
+        output_var: "booking_date",
+        next_node_key: "ca",
+        no_dates_next: "e",
+      },
+    },
+    {
+      node_key: "ca",
+      node_type: "check_availability",
+      config: overrides.ca ?? {
+        date_var: "booking_date",
+        text: "Pick a time",
+        button_label: "View times",
+        slot_interval_minutes: 30,
+        output_var: "booking_time",
+        next_node_key: "cr",
+        unavailable_next: "e",
+      },
+    },
+    {
+      node_key: "cr",
+      node_type: "create_reservation",
+      config: overrides.cr ?? {
+        date_var: "booking_date",
+        time_var: "booking_time",
+        party_size_var: "party_size",
+        reservation_status: "pending",
+        success_next: "e",
+        error_next: "e",
+      },
+    },
+    { node_key: "e", node_type: "end", config: {} },
+  ];
+}
+
+describe("validateFlowForActivation — booking nodes", () => {
+  it("accepts a well-formed booking flow", () => {
+    expect(validateFlowForActivation(bookingFlow, bookingNodes())).toEqual([]);
+  });
+
+  it("allows pick_date without a no-open-days branch (built-in fallback)", () => {
+    const issues = validateFlowForActivation(
+      bookingFlow,
+      bookingNodes({
+        pd: {
+          text: "Which day?",
+          days_to_offer: 2,
+          output_var: "booking_date",
+          next_node_key: "ca",
+        },
+      }),
+    );
+    expect(
+      issues.some((i) => i.node_key === "pd" && i.field === "no_dates_next"),
+    ).toBe(false);
+  });
+
+  it("flags pick_date with days_to_offer above the button limit", () => {
+    const issues = validateFlowForActivation(
+      bookingFlow,
+      bookingNodes({
+        pd: {
+          text: "Which day?",
+          days_to_offer: 5,
+          output_var: "booking_date",
+          next_node_key: "ca",
+          no_dates_next: "e",
+        },
+      }),
+    );
+    expect(
+      issues.some((i) => i.node_key === "pd" && i.field === "days_to_offer"),
+    ).toBe(true);
+  });
+
+  it("flags pick_date output_var that isn't a valid identifier", () => {
+    const issues = validateFlowForActivation(
+      bookingFlow,
+      bookingNodes({
+        pd: {
+          text: "Which day?",
+          days_to_offer: 2,
+          output_var: "2bad",
+          next_node_key: "ca",
+          no_dates_next: "e",
+        },
+      }),
+    );
+    expect(
+      issues.some((i) => i.node_key === "pd" && i.field === "output_var"),
+    ).toBe(true);
+  });
+
+  it("flags check_availability with a non-positive interval", () => {
+    const issues = validateFlowForActivation(
+      bookingFlow,
+      bookingNodes({
+        ca: {
+          date_var: "booking_date",
+          text: "Pick a time",
+          button_label: "View times",
+          slot_interval_minutes: 0,
+          output_var: "booking_time",
+          next_node_key: "cr",
+          unavailable_next: "e",
+        },
+      }),
+    );
+    expect(
+      issues.some(
+        (i) => i.node_key === "ca" && i.field === "slot_interval_minutes",
+      ),
+    ).toBe(true);
+  });
+
+  it("allows check_availability without an unavailable branch (built-in fallback)", () => {
+    const issues = validateFlowForActivation(
+      bookingFlow,
+      bookingNodes({
+        ca: {
+          date_var: "booking_date",
+          text: "Pick a time",
+          button_label: "View times",
+          slot_interval_minutes: 30,
+          output_var: "booking_time",
+          next_node_key: "cr",
+        },
+      }),
+    );
+    expect(
+      issues.some((i) => i.node_key === "ca" && i.field === "unavailable_next"),
+    ).toBe(false);
+  });
+
+  it("flags check_availability max_options above the list limit", () => {
+    const issues = validateFlowForActivation(
+      bookingFlow,
+      bookingNodes({
+        ca: {
+          date_var: "booking_date",
+          text: "Pick a time",
+          button_label: "View times",
+          slot_interval_minutes: 30,
+          max_options: 25,
+          output_var: "booking_time",
+          next_node_key: "cr",
+          unavailable_next: "e",
+        },
+      }),
+    );
+    expect(
+      issues.some((i) => i.node_key === "ca" && i.field === "max_options"),
+    ).toBe(true);
+  });
+
+  it("flags create_reservation missing a required var", () => {
+    const issues = validateFlowForActivation(
+      bookingFlow,
+      bookingNodes({
+        cr: {
+          date_var: "booking_date",
+          time_var: "booking_time",
+          party_size_var: "",
+          reservation_status: "pending",
+          success_next: "e",
+          error_next: "e",
+        },
+      }),
+    );
+    expect(
+      issues.some((i) => i.node_key === "cr" && i.field === "party_size_var"),
+    ).toBe(true);
+  });
+
+  it("flags create_reservation with an invalid status", () => {
+    const issues = validateFlowForActivation(
+      bookingFlow,
+      bookingNodes({
+        cr: {
+          date_var: "booking_date",
+          time_var: "booking_time",
+          party_size_var: "party_size",
+          reservation_status: "tentative",
+          success_next: "e",
+          error_next: "e",
+        },
+      }),
+    );
+    expect(
+      issues.some(
+        (i) => i.node_key === "cr" && i.field === "reservation_status",
+      ),
+    ).toBe(true);
+  });
+
+  it("allows create_reservation without branch targets (built-in messages)", () => {
+    const issues = validateFlowForActivation(
+      bookingFlow,
+      bookingNodes({
+        cr: {
+          date_var: "booking_date",
+          time_var: "booking_time",
+          party_size_var: "party_size",
+          reservation_status: "pending",
+        },
+      }),
+    );
+    expect(
+      issues.some(
+        (i) =>
+          i.node_key === "cr" &&
+          (i.field === "error_next" || i.field === "success_next"),
+      ),
+    ).toBe(false);
+  });
+
+  it("walks booking branches for reachability", () => {
+    const set = reachableFromEntry("s", bookingNodes());
+    expect(set).toEqual(new Set(["s", "pd", "ca", "cr", "e"]));
   });
 });

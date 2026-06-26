@@ -1,0 +1,71 @@
+---
+description: Enterprise engineering standards for building modules and features
+alwaysApply: true
+---
+
+# Engineering Standards
+
+Build every module to enterprise / industry-standard quality. Match this
+codebase's existing patterns — do not introduce foreign ones.
+
+## Next.js (read first — see AGENTS.md)
+
+This is Next.js 16 with breaking changes. BEFORE writing any Next.js code
+(route handlers, `page.tsx`/`layout.tsx`, server actions, data fetching,
+caching, metadata, edge logic), read the relevant guide under
+`node_modules/next/dist/docs/01-app/`. Heed runtime deprecation notices —
+e.g. use the `proxy` convention, not the deprecated `middleware`.
+(Search tools skip `node_modules`; open these docs with the file reader.)
+
+## Layered structure
+
+- `src/app/(dashboard)/<module>/` — route + page UI
+- `src/app/api/<module>/route.ts` — server endpoints
+- `src/lib/<module>/` — domain logic, pure & React-free (unit-testable)
+- `src/components/<module>/` — UI components
+- `src/hooks/`, `src/types/` — shared hooks and types
+- `supabase/migrations/NNN_*.sql` — sequentially numbered schema changes
+
+## Data & security (non-negotiable)
+
+- Every new table: enable RLS with account-scoped policies (follow the
+  `017_account_sharing` model). No table ships without policies.
+- Migrations are idempotent: `IF NOT EXISTS`, `DROP POLICY IF EXISTS`.
+- Authorize and validate every mutation server-side (use existing
+  `roles` / `api-context` helpers). Never expose the service-role key
+  to the client.
+
+## UI conventions (non-negotiable)
+
+- **Data tables** must ship with **search, filters, and pagination**
+  (see `src/app/(dashboard)/tables/page.tsx` and the Contacts page).
+  Small/account-scoped sets may filter+paginate client-side; large
+  sets paginate server-side via range queries.
+- **Destructive / irreversible actions** (delete, archive, revoke,
+  transfer) must confirm via the shared `ConfirmDialog`
+  (`@/components/ui/confirm-dialog`) — never `window.confirm`.
+- Page roots use `space-y-*` only — NO page-level padding. The
+  dashboard layout (`dashboard-shell.tsx`) already applies
+  `p-4 sm:p-6`; adding `p-6` on the page double-pads.
+- Reuse `src/components/ui/*` primitives; gate role-restricted
+  actions with `useCan(...)` / `GatedButton`.
+
+## Type safety & testing
+
+- Strict TypeScript; no `any` in domain code. Shared types in `src/types`.
+- Domain logic in `src/lib` ships with colocated `*.test.ts` (Vitest).
+
+## Quality gates (must pass before "done")
+
+```bash
+npm run lint
+npm run typecheck
+npm run test
+npm run format:check
+```
+
+## Workflow per module
+
+1. Short design note (data model, RLS, API surface, UI) → confirm.
+2. Migration + RLS → `lib` logic + tests → API routes → UI → sidebar wiring.
+3. Run quality gates, then summarize.

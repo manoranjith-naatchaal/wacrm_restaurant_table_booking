@@ -37,6 +37,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -48,6 +49,44 @@ import { cn } from "@/lib/utils";
 import { uploadAccountMedia, MEDIA_MAX_BYTES } from "@/lib/storage/upload-media";
 import { slugify, type BuilderNode } from "../shared";
 import { NextNodeRow, NodeKeySelect, TextRow } from "./fields";
+
+/**
+ * Labeled input for a flow var name — sanitizes to the
+ * alphanumeric+underscore shape the engine/validator require, and
+ * shows the `{{vars.X}}` interpolation hint.
+ */
+function VarRow({
+  label,
+  value,
+  placeholder,
+  onChange,
+  hint,
+}: {
+  label: string;
+  value: string;
+  placeholder?: string;
+  onChange: (v: string) => void;
+  hint?: boolean;
+}) {
+  return (
+    <div>
+      <label className="mb-1 block text-xs text-muted-foreground">{label}</label>
+      <Input
+        value={value}
+        onChange={(e) => onChange(e.target.value.replace(/[^a-zA-Z0-9_]/g, ""))}
+        placeholder={placeholder}
+        className="bg-muted font-mono text-xs"
+      />
+      {hint && value && (
+        <p className="mt-1 text-[10px] text-muted-foreground">
+          Use{" "}
+          <code className="rounded bg-muted px-1">{`{{vars.${value}}}`}</code>{" "}
+          in later messages.
+        </p>
+      )}
+    </div>
+  );
+}
 
 interface NodeConfigFormProps {
   node: BuilderNode;
@@ -188,6 +227,46 @@ export function NodeConfigForm({
         />
       );
 
+    case "pick_date":
+      return (
+        <PickDateForm
+          cfg={cfg as PickDateCfg}
+          allNodes={allNodes}
+          currentKey={node.node_key}
+          onUpdateConfig={onUpdateConfig}
+        />
+      );
+
+    case "check_availability":
+      return (
+        <CheckAvailabilityForm
+          cfg={cfg as CheckAvailabilityCfg}
+          allNodes={allNodes}
+          currentKey={node.node_key}
+          onUpdateConfig={onUpdateConfig}
+        />
+      );
+
+    case "create_reservation":
+      return (
+        <CreateReservationForm
+          cfg={cfg as CreateReservationCfg}
+          allNodes={allNodes}
+          currentKey={node.node_key}
+          onUpdateConfig={onUpdateConfig}
+        />
+      );
+
+    case "show_menu":
+      return (
+        <ShowMenuForm
+          cfg={cfg as ShowMenuCfg}
+          allNodes={allNodes}
+          currentKey={node.node_key}
+          onUpdateConfig={onUpdateConfig}
+        />
+      );
+
     case "handoff":
       return (
         <TextRow
@@ -215,6 +294,7 @@ export function NodeConfigForm({
 interface SendButtonsCfg {
   text?: string;
   footer_text?: string;
+  capture_var?: string;
   buttons?: Array<{ reply_id: string; title: string; next_node_key: string }>;
 }
 
@@ -267,6 +347,15 @@ function SendButtonsForm({
         value={cfg.footer_text ?? ""}
         onChange={(v) => onUpdateConfig({ footer_text: v })}
       />
+      {showAdvanced && (
+        <VarRow
+          label="Save tapped choice to variable (optional)"
+          value={cfg.capture_var ?? ""}
+          placeholder="e.g. party_size"
+          onChange={(v) => onUpdateConfig({ capture_var: v })}
+          hint
+        />
+      )}
       <div>
         <div className="mb-2 flex items-center justify-between">
           <label className="text-xs text-muted-foreground">
@@ -345,6 +434,7 @@ interface SendListCfg {
   text?: string;
   button_label?: string;
   footer_text?: string;
+  capture_var?: string;
   sections?: Array<{
     title?: string;
     rows: Array<{
@@ -463,6 +553,15 @@ function SendListForm({
           onChange={(v) => onUpdateConfig({ footer_text: v })}
         />
       </div>
+      {showAdvanced && (
+        <VarRow
+          label="Save tapped choice to variable (optional)"
+          value={cfg.capture_var ?? ""}
+          placeholder="e.g. topic"
+          onChange={(v) => onUpdateConfig({ capture_var: v })}
+          hint
+        />
+      )}
 
       <div className="mt-2">
         <label className="mb-2 block text-xs text-muted-foreground">
@@ -1044,5 +1143,286 @@ function SendMediaForm({
         label="After sending, advance to"
       />
     </>
+  );
+}
+
+// ============================================================
+// pick_date — booking: offer Today / Tomorrow
+// ============================================================
+
+interface PickDateCfg {
+  text?: string;
+  options?: Array<"today" | "tomorrow">;
+  skip_closed?: boolean;
+  output_var?: string;
+  next_node_key?: string;
+  no_dates_next?: string;
+}
+
+function PickDateForm({
+  cfg,
+  allNodes,
+  currentKey,
+  onUpdateConfig,
+}: {
+  cfg: PickDateCfg;
+  allNodes: BuilderNode[];
+  currentKey: string;
+  onUpdateConfig: (patch: Record<string, unknown>) => void;
+}) {
+  return (
+    <>
+      <TextRow
+        label="Prompt body"
+        value={cfg.text ?? ""}
+        onChange={(v) => onUpdateConfig({ text: v })}
+        rows={2}
+      />
+      <p className="text-xs text-muted-foreground">
+        Offers the next <strong>2 open days</strong> as buttons, starting
+        from today. Closed days are skipped automatically, and today only
+        shows if it still has time left. If nothing&apos;s open, the guest
+        gets a polite &ldquo;try again later&rdquo; message.
+      </p>
+      <NextNodeRow
+        value={cfg.next_node_key ?? ""}
+        allNodes={allNodes}
+        currentKey={currentKey}
+        onChange={(v) => onUpdateConfig({ next_node_key: v })}
+        label="After a date is picked, advance to"
+      />
+    </>
+  );
+}
+
+// ============================================================
+// check_availability — booking: list open times for a date
+// ============================================================
+
+interface CheckAvailabilityCfg {
+  date_var?: string;
+  text?: string;
+  button_label?: string;
+  slot_interval_minutes?: number;
+  max_options?: number;
+  output_var?: string;
+  next_node_key?: string;
+  unavailable_next?: string;
+}
+
+function CheckAvailabilityForm({
+  cfg,
+  allNodes,
+  currentKey,
+  onUpdateConfig,
+}: {
+  cfg: CheckAvailabilityCfg;
+  allNodes: BuilderNode[];
+  currentKey: string;
+  onUpdateConfig: (patch: Record<string, unknown>) => void;
+}) {
+  return (
+    <>
+      <TextRow
+        label="Prompt body"
+        value={cfg.text ?? ""}
+        onChange={(v) => onUpdateConfig({ text: v })}
+        rows={2}
+      />
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <TextRow
+          label="List button label (≤20)"
+          value={cfg.button_label ?? ""}
+          onChange={(v) => onUpdateConfig({ button_label: v })}
+        />
+        <div>
+          <label className="mb-1 block text-xs text-muted-foreground">
+            Minutes between times
+          </label>
+          <Input
+            type="number"
+            min={5}
+            value={cfg.slot_interval_minutes ?? 30}
+            onChange={(e) =>
+              onUpdateConfig({
+                slot_interval_minutes: Number(e.target.value) || 0,
+              })
+            }
+            className="bg-muted"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-muted-foreground">
+            Max times (≤10)
+          </label>
+          <Input
+            type="number"
+            min={1}
+            max={10}
+            value={cfg.max_options ?? 10}
+            onChange={(e) =>
+              onUpdateConfig({ max_options: Number(e.target.value) || 0 })
+            }
+            className="bg-muted"
+          />
+        </div>
+      </div>
+      <NextNodeRow
+        value={cfg.next_node_key ?? ""}
+        allNodes={allNodes}
+        currentKey={currentKey}
+        onChange={(v) => onUpdateConfig({ next_node_key: v })}
+        label="After a time is picked, advance to"
+      />
+      <p className="text-xs text-muted-foreground">
+        If the day has no times left, the guest gets a polite
+        &ldquo;no times available&rdquo; message automatically.
+      </p>
+    </>
+  );
+}
+
+// ============================================================
+// create_reservation — booking: write the reservation
+// ============================================================
+
+interface CreateReservationCfg {
+  date_var?: string;
+  time_var?: string;
+  party_size_var?: string;
+  reservation_status?: string;
+  guest_name_var?: string;
+  notes_template?: string;
+  success_next?: string;
+  error_next?: string;
+}
+
+function CreateReservationForm({
+  cfg,
+  allNodes,
+  currentKey,
+  onUpdateConfig,
+}: {
+  cfg: CreateReservationCfg;
+  allNodes: BuilderNode[];
+  currentKey: string;
+  onUpdateConfig: (patch: Record<string, unknown>) => void;
+}) {
+  return (
+    <>
+      <p className="text-xs text-muted-foreground">
+        Creates the booking from the day, time, and party size the guest
+        chose earlier in this flow. No table is assigned — staff confirm
+        and seat from the Reservations page.
+      </p>
+      <div>
+        <label className="mb-1 block text-xs text-muted-foreground">
+          Create the booking as
+        </label>
+        <Select
+          value={cfg.reservation_status ?? "pending"}
+          onValueChange={(v) => onUpdateConfig({ reservation_status: v })}
+        >
+          <SelectTrigger className="bg-muted">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="pending">Pending</SelectItem>
+            <SelectItem value="confirmed">Confirmed</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <TextRow
+        label="Note saved on the reservation (optional)"
+        value={cfg.notes_template ?? ""}
+        onChange={(v) => onUpdateConfig({ notes_template: v })}
+        rows={2}
+      />
+      <NextNodeRow
+        value={cfg.success_next ?? ""}
+        allNodes={allNodes}
+        currentKey={currentKey}
+        onChange={(v) => onUpdateConfig({ success_next: v })}
+        label="After booking → advance to (optional)"
+      />
+      <p className="text-xs text-muted-foreground">
+        Leave this as <strong>None</strong> to send a built-in confirmation
+        and finish. If the booking can&apos;t be made, the guest
+        automatically gets a polite &ldquo;couldn&apos;t book&rdquo; message.
+      </p>
+    </>
+  );
+}
+
+// ============================================================
+// show_menu — menu: send the restaurant menu as text
+// ============================================================
+
+interface ShowMenuCfg {
+  intro_text?: string;
+  include_prices?: boolean;
+  include_descriptions?: boolean;
+  next_node_key?: string;
+}
+
+function ShowMenuForm({
+  cfg,
+  allNodes,
+  currentKey,
+  onUpdateConfig,
+}: {
+  cfg: ShowMenuCfg;
+  allNodes: BuilderNode[];
+  currentKey: string;
+  onUpdateConfig: (patch: Record<string, unknown>) => void;
+}) {
+  return (
+    <>
+      <TextRow
+        label="Intro line (optional)"
+        value={cfg.intro_text ?? ""}
+        onChange={(v) => onUpdateConfig({ intro_text: v })}
+        rows={2}
+      />
+      <p className="text-xs text-muted-foreground">
+        The menu is built automatically from your{" "}
+        <strong>available menu items</strong> on the Menu page, grouped by
+        category and priced in your account currency.
+      </p>
+      <ToggleRow
+        label="Show prices"
+        checked={cfg.include_prices ?? true}
+        onChange={(v) => onUpdateConfig({ include_prices: v })}
+      />
+      <ToggleRow
+        label="Show descriptions"
+        checked={cfg.include_descriptions ?? true}
+        onChange={(v) => onUpdateConfig({ include_descriptions: v })}
+      />
+      <NextNodeRow
+        value={cfg.next_node_key ?? ""}
+        allNodes={allNodes}
+        currentKey={currentKey}
+        onChange={(v) => onUpdateConfig({ next_node_key: v })}
+        label="Advances to"
+      />
+    </>
+  );
+}
+
+function ToggleRow({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <div className="border-border flex items-center justify-between rounded-lg border px-3 py-2">
+      <span className="text-foreground text-sm">{label}</span>
+      <Switch checked={checked} onCheckedChange={onChange} />
+    </div>
   );
 }

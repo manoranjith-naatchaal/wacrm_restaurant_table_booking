@@ -31,6 +31,27 @@ describe("deriveCanvasEdges — single-outgoing node types", () => {
     });
   });
 
+  it("derives a `next` edge from show_menu and exposes one slot", () => {
+    const menu: BuilderNode = {
+      node_key: "menu",
+      node_type: "show_menu",
+      config: { intro_text: "Menu:", next_node_key: "b" },
+    };
+    const edges = deriveCanvasEdges(
+      nodes(menu, { node_key: "b", node_type: "end", config: {} }),
+    );
+    expect(edges).toHaveLength(1);
+    expect(edges[0]).toMatchObject({
+      source: "menu",
+      target: "b",
+      sourceHandle: "next",
+    });
+    expect(outgoingSlots(menu)).toEqual([{ id: "next", label: "Next" }]);
+    expect(applyEdgeConnection(menu, "next", "z")).toEqual({
+      next_node_key: "z",
+    });
+  });
+
   it("derives a `next` edge from send_media, set_tag, collect_input, start", () => {
     const edges = deriveCanvasEdges(
       nodes(
@@ -587,5 +608,87 @@ describe("unlinkNodeReferences", () => {
     expect(after).toHaveLength(2);
     expect(after[0]).toBe(nodes[0]);
     expect(after[1]).toBe(nodes[1]);
+  });
+});
+
+// ============================================================
+// Booking nodes — two-branch edge model
+// ============================================================
+
+describe("booking node edges", () => {
+  const bookingGraph = (): BuilderNode[] => [
+    {
+      node_key: "pd",
+      node_type: "pick_date",
+      config: { next_node_key: "ca", no_dates_next: "closed" },
+    },
+    {
+      node_key: "ca",
+      node_type: "check_availability",
+      config: { next_node_key: "cr", unavailable_next: "closed" },
+    },
+    {
+      node_key: "cr",
+      node_type: "create_reservation",
+      config: { success_next: "done", error_next: "closed" },
+    },
+    { node_key: "ca2", node_type: "end", config: {} },
+    { node_key: "cr2", node_type: "end", config: {} },
+    { node_key: "closed", node_type: "end", config: {} },
+    { node_key: "done", node_type: "end", config: {} },
+  ];
+
+  it("derives both branches for each booking node", () => {
+    const edges = deriveCanvasEdges(bookingGraph());
+    const handles = edges
+      .filter((e) => ["pd", "ca", "cr"].includes(e.source))
+      .map((e) => `${e.source}:${e.sourceHandle}->${e.target}`)
+      .sort();
+    expect(handles).toEqual(
+      [
+        "ca:next->cr",
+        "ca:unavailable->closed",
+        "cr:error->closed",
+        "cr:success->done",
+        "pd:next->ca",
+        "pd:no_dates->closed",
+      ].sort(),
+    );
+  });
+
+  it("lists two outgoing slots per booking node", () => {
+    expect(outgoingSlots(bookingGraph()[0]).map((s) => s.id)).toEqual([
+      "next",
+      "no_dates",
+    ]);
+    expect(outgoingSlots(bookingGraph()[1]).map((s) => s.id)).toEqual([
+      "next",
+      "unavailable",
+    ]);
+    expect(outgoingSlots(bookingGraph()[2]).map((s) => s.id)).toEqual([
+      "success",
+      "error",
+    ]);
+  });
+
+  it("applies a dragged edge to the right branch field", () => {
+    const ca = bookingGraph()[1];
+    expect(applyEdgeConnection(ca, "unavailable", "x")).toEqual({
+      unavailable_next: "x",
+    });
+    const cr = bookingGraph()[2];
+    expect(applyEdgeConnection(cr, "success", "x")).toEqual({
+      success_next: "x",
+    });
+  });
+
+  it("unlinks deleted targets from booking branches", () => {
+    const after = unlinkNodeReferences(bookingGraph(), "closed");
+    const pd = after.find((n) => n.node_key === "pd")!;
+    const cr = after.find((n) => n.node_key === "cr")!;
+    expect(pd.config.no_dates_next).toBe("");
+    expect(pd.config.next_node_key).toBe("ca");
+    expect(cr.config.error_next).toBe("");
+    expect(cr.config.success_next).toBe("done");
   });
 });

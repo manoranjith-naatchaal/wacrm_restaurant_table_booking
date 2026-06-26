@@ -1,4 +1,4 @@
-import type { AccountRole } from "@/lib/auth/roles";
+import type { AccountRole } from '@/lib/auth/roles';
 
 export interface Profile {
   id: string;
@@ -77,13 +77,235 @@ export interface AccountInvitation {
   id: string;
   account_id: string;
   /** Roles offered via invite — owner is never offered. */
-  role: Exclude<AccountRole, "owner">;
+  role: Exclude<AccountRole, 'owner'>;
   created_by_user_id: string | null;
   label: string | null;
   created_at: string;
   expires_at: string;
   accepted_at: string | null;
   accepted_by_user_id: string | null;
+}
+
+// ============================================================
+// Booking domain — Tables & Seating (migration 027)
+// ============================================================
+
+export interface RestaurantTable {
+  id: string;
+  /** Tenancy key — NOT NULL. Every table belongs to one account. */
+  account_id: string;
+  /** Creator/audit only; nullable (ON DELETE SET NULL). */
+  user_id: string | null;
+  /** Human label on the floor, e.g. "T1" or "Window 4". Unique per account. */
+  label: string;
+  /** Seat count; always >= 1. */
+  capacity: number;
+  /** Free-text dining zone, e.g. "Indoor", "Patio". Optional. */
+  area?: string | null;
+  /** Soft-disable flag — retire a table without deleting it. */
+  is_active: boolean;
+  notes?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
+// Menu (migration 035)
+// ============================================================
+
+export interface MenuItem {
+  id: string;
+  /** Tenancy key — NOT NULL. */
+  account_id: string;
+  /** Creator/audit only; nullable (ON DELETE SET NULL). */
+  user_id: string | null;
+  /** Dish name, e.g. "Margherita Pizza". */
+  name: string;
+  /** Optional blurb shown under the name. */
+  description?: string | null;
+  /** Free-text grouping, e.g. "Starters", "Mains". Optional. */
+  category?: string | null;
+  /** Price in the account's default currency; null = market price / POA. */
+  price?: number | null;
+  /** Soft-hide flag — 86 an item without deleting it. */
+  is_available: boolean;
+  /** Ordering within the menu; lower shows first. */
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
+// Booking domain — Slots & Timings (migration 028)
+// ============================================================
+
+/** 0 = Sunday … 6 = Saturday (matches JS `Date.getDay()`). */
+export type DayOfWeek = 0 | 1 | 2 | 3 | 4 | 5 | 6;
+
+export interface BookingSlot {
+  id: string;
+  /** Tenancy key — NOT NULL. */
+  account_id: string;
+  /** Creator/audit only; nullable (ON DELETE SET NULL). */
+  user_id: string | null;
+  day_of_week: DayOfWeek;
+  /** "HH:MM" (or "HH:MM:SS" from the DB) — local wall-clock time. */
+  start_time: string;
+  end_time: string;
+  /** Soft-disable flag — close a slot without deleting it. */
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Date-specific override that beats the weekly slots.
+ *  - closed_all_day: date(s) fully closed; times are null.
+ *  - closed_time:    block a time window each day in the range.
+ *  - open_special:   open a special window even on an off day.
+ */
+export type BookingExceptionKind =
+  | 'closed_all_day'
+  | 'closed_time'
+  | 'open_special';
+
+export interface BookingException {
+  id: string;
+  /** Tenancy key — NOT NULL. */
+  account_id: string;
+  /** Creator/audit only; nullable (ON DELETE SET NULL). */
+  user_id: string | null;
+  kind: BookingExceptionKind;
+  /** Inclusive range "YYYY-MM-DD". A single day has start === end. */
+  start_date: string;
+  end_date: string;
+  /** "HH:MM" (or "HH:MM:SS" from the DB); null for closed_all_day. */
+  start_time: string | null;
+  end_time: string | null;
+  /** Optional note, e.g. "Public holiday", "Staff training". */
+  reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
+// Booking domain — Guests (migration 031)
+// ============================================================
+
+export interface Guest {
+  id: string;
+  /** Tenancy key — NOT NULL. */
+  account_id: string;
+  /** Creator/audit only; nullable (ON DELETE SET NULL). */
+  user_id: string | null;
+  /** Optional link to a WhatsApp contact; null for walk-ins/phone. */
+  contact_id: string | null;
+  /** Required, self-contained display name. */
+  name: string;
+  phone: string | null;
+  email: string | null;
+  is_vip: boolean;
+  /** Allergies / dietary preferences. */
+  dietary_notes: string | null;
+  /** General free-text notes. */
+  notes: string | null;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
+// Booking domain — Reservations (migration 032)
+// ============================================================
+
+export type ReservationStatus =
+  | 'pending'
+  | 'confirmed'
+  | 'seated'
+  | 'completed'
+  | 'cancelled'
+  | 'no_show';
+
+export interface Reservation {
+  id: string;
+  account_id: string;
+  user_id: string | null;
+  guest_id: string;
+  /** Optional table assignment; null until seated/assigned. */
+  table_id: string | null;
+  /** "YYYY-MM-DD". */
+  reservation_date: string;
+  /** "HH:MM" / "HH:MM:SS". */
+  start_time: string;
+  end_time: string | null;
+  party_size: number;
+  status: ReservationStatus;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Lightweight guest/table slices embedded with a reservation row. */
+export interface ReservationGuestLite {
+  id: string;
+  name: string;
+  phone: string | null;
+  is_vip: boolean;
+}
+
+export interface ReservationTableLite {
+  id: string;
+  label: string;
+  capacity: number;
+}
+
+export interface ReservationWithRelations extends Reservation {
+  guest: ReservationGuestLite | null;
+  table: ReservationTableLite | null;
+}
+
+/** Shape returned by GET /api/availability?date=… */
+export interface DayAvailabilityResponse {
+  date: string;
+  closed: boolean;
+  windows: { start: string; end: string }[];
+}
+
+/** Minimal contact shape surfaced alongside a guest for display. */
+export interface GuestLinkedContact {
+  id: string;
+  name: string | null;
+  phone: string;
+  avatar_url: string | null;
+}
+
+/** A guest row joined with its linked contact (list/detail views). */
+export interface GuestWithContact extends Guest {
+  contact: GuestLinkedContact | null;
+}
+
+/**
+ * One past/upcoming reservation row as shown in a guest's history.
+ * Populated once the Reservations module lands (migration TBD); the
+ * Guests detail UI already renders this shape.
+ */
+export interface GuestReservationSummary {
+  id: string;
+  reservation_date: string;
+  start_time: string | null;
+  party_size: number;
+  status: string;
+  table_label: string | null;
+}
+
+/** Aggregated visit metrics derived from a guest's reservations. */
+export interface GuestStats {
+  total: number;
+  completed: number;
+  upcoming: number;
+  cancelled: number;
+  no_shows: number;
+  last_visit: string | null;
 }
 
 export interface Contact {
@@ -169,7 +391,12 @@ export type ContentType =
   | 'template'
   /** Customer tapped a reply button or list row on a message we sent. */
   | 'interactive';
-export type MessageStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
+export type MessageStatus =
+  | 'sending'
+  | 'sent'
+  | 'delivered'
+  | 'read'
+  | 'failed';
 
 export interface Message {
   id: string;
@@ -317,8 +544,19 @@ export interface Deal {
   assignee?: Profile;
 }
 
-export type BroadcastStatus = 'draft' | 'scheduled' | 'sending' | 'sent' | 'failed';
-export type RecipientStatus = 'pending' | 'sent' | 'delivered' | 'read' | 'replied' | 'failed';
+export type BroadcastStatus =
+  | 'draft'
+  | 'scheduled'
+  | 'sending'
+  | 'sent'
+  | 'failed';
+export type RecipientStatus =
+  | 'pending'
+  | 'sent'
+  | 'delivered'
+  | 'read'
+  | 'replied'
+  | 'failed';
 
 export interface Broadcast {
   id: string;

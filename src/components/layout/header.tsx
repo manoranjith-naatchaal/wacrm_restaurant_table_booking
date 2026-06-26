@@ -25,7 +25,16 @@ const pageTitles: Record<string, string> = {
   "/pipelines": "Pipelines",
   "/broadcasts": "Broadcasts",
   "/automations": "Automations",
+  "/flows": "Flows",
   "/settings": "Settings",
+  // Booking domain
+  "/booking": "Overview",
+  "/reservations": "Reservations",
+  "/slots": "Slots & Timings",
+  "/exceptions": "Special Hours",
+  "/tables": "Tables & Seating",
+  "/guests": "Guests",
+  "/menu": "Menu",
 };
 
 function getPageTitle(pathname: string): string {

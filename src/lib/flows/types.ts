@@ -18,6 +18,8 @@
  * references in JSONB.
  */
 
+import type { ReservationStatus } from "@/types";
+
 // ============================================================
 // Node configs (discriminated union by node_type)
 // ============================================================
@@ -39,6 +41,12 @@ export interface SendButtonsNodeConfig {
   /** Optional header / footer lines around the buttons. */
   header_text?: string;
   footer_text?: string;
+  /**
+   * Optional var to store the tapped button's reply_id under. Lets a
+   * button choice (e.g. party size) feed downstream nodes without a
+   * free-text collect step. Omit to only route, not capture.
+   */
+  capture_var?: string;
   /** 1-3 buttons; Meta cap enforced in meta-api validation. */
   buttons: Array<{
     /** Stable id sent back by Meta when this button is tapped. */
@@ -56,6 +64,9 @@ export interface SendListNodeConfig {
   button_label: string;
   header_text?: string;
   footer_text?: string;
+  /** Optional var to store the tapped row's reply_id under (see
+   *  SendButtonsNodeConfig.capture_var). */
+  capture_var?: string;
   /** 1-10 rows TOTAL across sections; cap enforced in meta-api. */
   sections: Array<{
     title?: string;
@@ -173,6 +184,147 @@ export interface SetTagNodeConfig {
   next_node_key: string;
 }
 
+// ============================================================
+// Booking nodes (migration 034) — adapters that expose the booking
+// domain (availability + reservations) as composable flow steps.
+// ============================================================
+
+/**
+ * Offers the next open booking days as buttons, scanning forward from
+ * today and skipping any day with no bookable windows (resolved from
+ * booking_slots + booking_exceptions). Captures the tapped ISO date
+ * into a var, then advances. The reply_id of each button IS the ISO
+ * date, so the runner stores it directly.
+ *
+ * Today is only offered when it still has time left (a window ending
+ * after the current clock time). If no open day is found within the
+ * search horizon the run routes to `no_dates_next`.
+ *
+ * Dates are resolved in the account's booking timezone
+ * (booking_settings.timezone) — not the server's — so they match what
+ * the restaurant sees.
+ *
+ * `options` / `skip_closed` are retained for backward compatibility
+ * with older saved flows but are no longer used by the runner (closed
+ * days are always skipped).
+ */
+export interface PickDateNodeConfig {
+  /** Prompt body (e.g. "Which day would you like to book?"). */
+  text: string;
+  header_text?: string;
+  footer_text?: string;
+  /** How many open days to offer as buttons (1–3). Defaults to 2. */
+  days_to_offer?: number;
+  /** @deprecated No longer used — closed days are always skipped. */
+  options?: Array<"today" | "tomorrow">;
+  /** @deprecated No longer used — closed days are always skipped. */
+  skip_closed?: boolean;
+  /** Var to store the chosen ISO date ("YYYY-MM-DD"). */
+  output_var: string;
+  /** Advance target after a date is picked. */
+  next_node_key: string;
+  /**
+   * Optional advance target when no open day is found within the
+   * horizon. When unset, the runner sends a built-in apology and ends
+   * the run — so this rare case needs no wiring.
+   */
+  no_dates_next?: string;
+}
+
+/**
+ * Resolves the open time windows for the date held in `date_var`,
+ * enumerates selectable start times at `slot_interval_minutes`, and
+ * sends them as an interactive list. The reply_id of each row is the
+ * "HH:MM" start time, captured into `output_var` on tap.
+ *
+ * Times that have already passed are filtered out when the chosen
+ * date is "today" in the booking timezone. When the date is closed or
+ * has no remaining times, the run routes to `unavailable_next`
+ * instead of suspending.
+ */
+export interface CheckAvailabilityNodeConfig {
+  /** Var holding the ISO date to look up (set by pick_date earlier). */
+  date_var: string;
+  /** Prompt body shown above the list. Supports {{vars.X}}. */
+  text: string;
+  /** Tap-to-expand label on the list bubble (e.g. "View times"). */
+  button_label: string;
+  header_text?: string;
+  footer_text?: string;
+  /** Minutes between offered start times within each open window. */
+  slot_interval_minutes: number;
+  /** Max times to offer. Capped at WhatsApp's 10-row list limit. */
+  max_options?: number;
+  /** Var to store the chosen start time ("HH:MM"). */
+  output_var: string;
+  /** Advance target after a time is picked. */
+  next_node_key: string;
+  /**
+   * Optional advance target when the day has no bookable times left.
+   * When unset, the runner sends a built-in apology and ends the run.
+   */
+  unavailable_next?: string;
+}
+
+/**
+ * Writes the reservation. Resolves (or creates) a guest from the
+ * conversation's WhatsApp contact, re-validates the slot against live
+ * availability (race-safe — the time may have filled since the list
+ * was shown), then inserts the booking with no table assigned.
+ *
+ * Auto-advances to `success_next` on success or `error_next` when the
+ * booking can't be made (closed window, invalid party size, DB error).
+ * Both branches are optional: when unset, the runner sends a built-in
+ * confirmation (success) or apology (error) and ends the run — so the
+ * block works on its own with no wiring. Stores the new reservation id
+ * in `vars.reservation_id` for use in a downstream confirmation message.
+ */
+export interface CreateReservationNodeConfig {
+  /** Var holding the ISO date. */
+  date_var: string;
+  /** Var holding the start time ("HH:MM"). */
+  time_var: string;
+  /** Var holding the party size (parsed to an integer). */
+  party_size_var: string;
+  /** Status for the created reservation (default 'pending'). */
+  reservation_status: ReservationStatus;
+  /** Optional var whose value seeds the guest name on first creation. */
+  guest_name_var?: string;
+  /** Optional notes stored on the reservation. Supports {{vars.X}}. */
+  notes_template?: string;
+  /** Optional advance target on a successful booking (built-in
+   *  confirmation + end when unset). */
+  success_next?: string;
+  /** Optional advance target when the booking can't be made (built-in
+   *  apology + end when unset). */
+  error_next?: string;
+}
+
+// ============================================================
+// Menu node (migration 036)
+// ============================================================
+
+/**
+ * Sends the account's menu as a text message, then auto-advances like
+ * send_message. The runner reads available `menu_items`, groups them
+ * by category, prices them in the account currency, and renders a
+ * WhatsApp text block (see `lib/menu/render.ts`). No customer input —
+ * it's a one-shot display step.
+ *
+ * When the menu is empty, the runner sends a short "menu unavailable"
+ * line and still advances, so the flow never stalls.
+ */
+export interface ShowMenuNodeConfig {
+  /** Optional intro line shown above the menu (e.g. "Here's our menu:"). */
+  intro_text?: string;
+  /** Show prices next to each item. Default true. */
+  include_prices?: boolean;
+  /** Show item descriptions. Default true. */
+  include_descriptions?: boolean;
+  /** Auto-advance target after the message lands at Meta. */
+  next_node_key: string;
+}
+
 // Terminal nodes carry no config — they just stop the run.
 export type EndNodeConfig = Record<string, never>;
 
@@ -193,6 +345,10 @@ export type FlowNodeConfig =
   | { node_type: "collect_input"; config: CollectInputNodeConfig }
   | { node_type: "condition"; config: ConditionNodeConfig }
   | { node_type: "set_tag"; config: SetTagNodeConfig }
+  | { node_type: "pick_date"; config: PickDateNodeConfig }
+  | { node_type: "check_availability"; config: CheckAvailabilityNodeConfig }
+  | { node_type: "create_reservation"; config: CreateReservationNodeConfig }
+  | { node_type: "show_menu"; config: ShowMenuNodeConfig }
   | { node_type: "handoff"; config: HandoffNodeConfig }
   | { node_type: "end"; config: EndNodeConfig };
 

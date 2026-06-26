@@ -17,6 +17,9 @@
  */
 
 import {
+  CalendarCheck,
+  CalendarClock,
+  CalendarDays,
   Flag,
   GitFork,
   Inbox,
@@ -27,6 +30,7 @@ import {
   PlayCircle,
   Tag,
   UserPlus,
+  UtensilsCrossed,
   Workflow,
 } from "lucide-react";
 
@@ -47,6 +51,10 @@ export type NodeType =
   | "collect_input"
   | "condition"
   | "set_tag"
+  | "pick_date"
+  | "check_availability"
+  | "create_reservation"
+  | "show_menu"
   | "handoff"
   | "end";
 
@@ -104,6 +112,26 @@ export const NODE_META: Record<
     label: "Tag contact",
     icon: Tag,
     color: "text-pink-400",
+  },
+  pick_date: {
+    label: "Pick date",
+    icon: CalendarDays,
+    color: "text-orange-400",
+  },
+  check_availability: {
+    label: "Show times",
+    icon: CalendarClock,
+    color: "text-amber-400",
+  },
+  create_reservation: {
+    label: "Book table",
+    icon: CalendarCheck,
+    color: "text-green-400",
+  },
+  show_menu: {
+    label: "Show menu",
+    icon: UtensilsCrossed,
+    color: "text-rose-400",
   },
   handoff: {
     label: "Handoff to agent",
@@ -246,6 +274,37 @@ export function summarizeNode(node: BuilderNode): string | null {
       // short prefix of the UUID so users can disambiguate between
       // multiple set_tag nodes at a glance.
       return tagId ? `${mode} tag ${tagId.slice(0, 8)}…` : `${mode} tag (none picked)`;
+    }
+    case "pick_date": {
+      const n =
+        typeof cfg.days_to_offer === "number" && cfg.days_to_offer > 0
+          ? cfg.days_to_offer
+          : 2;
+      return `Offer next ${n} open day${n === 1 ? "" : "s"}`;
+    }
+    case "check_availability": {
+      const dateVar = typeof cfg.date_var === "string" ? cfg.date_var : "";
+      const interval =
+        typeof cfg.slot_interval_minutes === "number"
+          ? cfg.slot_interval_minutes
+          : null;
+      if (!dateVar) return interval ? `Every ${interval} min` : null;
+      return interval
+        ? `Times for vars.${dateVar} · every ${interval} min`
+        : `Times for vars.${dateVar}`;
+    }
+    case "create_reservation": {
+      const status =
+        typeof cfg.reservation_status === "string"
+          ? cfg.reservation_status
+          : "pending";
+      return `Book as ${status}`;
+    }
+    case "show_menu": {
+      const intro = typeof cfg.intro_text === "string" ? cfg.intro_text : "";
+      return intro.length > 0
+        ? truncate(intro)
+        : "Show the restaurant menu";
     }
     case "handoff": {
       const note = typeof cfg.note === "string" ? cfg.note : "";

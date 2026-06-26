@@ -41,22 +41,52 @@ import {
 } from "./meta-send";
 import { decideFallback, resolveFallbackPolicy } from "./fallback";
 import {
+  addDaysIso,
+  createReservationFromFlow,
+  dateButtonLabel,
+  DEFAULT_BOOKING_TIMEZONE,
+  enumerateStartTimes,
+  formatTime12,
+  getAccountTimezone,
+  getZonedNow,
+  hasOpenTimeRemaining,
+  shortDayLabel,
+} from "./booking";
+import { getAccountAvailability } from "@/lib/reservations/booking-checks";
+import {
+  type CheckAvailabilityNodeConfig,
   type CollectInputNodeConfig,
   type ConditionNodeConfig,
+  type CreateReservationNodeConfig,
   type DispatchInboundInput,
   type DispatchInboundResult,
   type FlowNodeRow,
   type FlowRow,
   type FlowRunRow,
   type ParsedInbound,
+  type PickDateNodeConfig,
   type SendButtonsNodeConfig,
   type SendListNodeConfig,
   type SendMediaNodeConfig,
   type SendMessageNodeConfig,
   type SetTagNodeConfig,
+  type ShowMenuNodeConfig,
   type StartNodeConfig,
   type KeywordTriggerConfig,
 } from "./types";
+import { renderMenuText } from "@/lib/menu/render";
+import { DEFAULT_CURRENCY } from "@/lib/currency";
+import type { MenuItem } from "@/types";
+
+/** Reserved var keys the booking nodes use to remember what they
+ *  offered, so the reply handler can validate the tapped option. */
+const OFFERED_DATES_KEY = "__pick_date_options";
+const OFFERED_TIMES_KEY = "__avail_options";
+
+/** Coerce a stored var to a string ("" when absent). */
+function strVar(v: unknown): string {
+  return typeof v === "string" ? v : v == null ? "" : String(v);
+}
 
 // ============================================================
 // Pure helpers — extracted so engine.test.ts can exercise them
@@ -116,16 +146,25 @@ export function isAutoAdvancing(node_type: string): boolean {
     node_type === "send_message" ||
     node_type === "send_media" ||
     node_type === "condition" ||
-    node_type === "set_tag"
+    node_type === "set_tag" ||
+    // Composes a menu message then advances like send_message.
+    node_type === "show_menu" ||
+    // Action node — does its DB work then routes success/error.
+    node_type === "create_reservation"
   );
 }
 
-/** Nodes that send a prompt and suspend awaiting a customer reply. */
+/** Nodes that send a prompt and suspend awaiting a customer reply.
+ *  `pick_date`/`check_availability` usually suspend, but may instead
+ *  route straight to a branch (no open days / no times) — classified
+ *  as suspending for the inbox's "awaiting reply" display. */
 export function isSuspending(node_type: string): boolean {
   return (
     node_type === "send_buttons" ||
     node_type === "send_list" ||
-    node_type === "collect_input"
+    node_type === "collect_input" ||
+    node_type === "pick_date" ||
+    node_type === "check_availability"
   );
 }
 
@@ -430,6 +469,403 @@ async function sendListAndSuspend(
   return { outcome: "advanced", node_key: node.node_key };
 }
 
+/**
+ * Look up the internal message id for a just-sent prompt and persist
+ * it (so the inbox can quote it) alongside a vars patch — used by the
+ * booking nodes to remember the options they offered.
+ */
+async function persistOfferedAndPrompt(
+  db: AdminClient,
+  run: FlowRunRow,
+  varsPatch: Record<string, unknown>,
+  whatsappMessageId: string,
+): Promise<void> {
+  const { data: msg } = await db
+    .from("messages")
+    .select("id")
+    .eq("message_id", whatsappMessageId)
+    .maybeSingle();
+  const newVars = { ...run.vars, ...varsPatch };
+  await db
+    .from("flow_runs")
+    .update({
+      vars: newVars,
+      last_prompt_message_id: (msg as { id: string } | null)?.id ?? null,
+    })
+    .eq("id", run.id);
+  // Mirror in-memory so the reply handler (which reads run.vars) sees
+  // the offered options without a re-SELECT.
+  run.vars = newVars;
+}
+
+/**
+ * Result of a booking node executor: suspend awaiting a tap, route to
+ * a branch (no open days / no times / booking result), or fail the run.
+ */
+type BookingExec =
+  | { kind: "suspend" }
+  | { kind: "advance"; next: string }
+  // A terminal message was already sent (e.g. "no open days") — end the
+  // run as completed rather than failed.
+  | { kind: "complete" }
+  | { kind: "fail"; reason: string };
+
+/** Send a one-off message and swallow send errors (logged) — used for
+ *  the booking nodes' built-in "nothing available" replies. */
+async function sendBuiltinNotice(
+  db: AdminClient,
+  run: FlowRunRow,
+  nodeKey: string,
+  reason: string,
+  text: string,
+): Promise<void> {
+  try {
+    const { whatsapp_message_id } = await engineSendText({
+      accountId: run.account_id,
+      userId: run.user_id,
+      conversationId: run.conversation_id!,
+      contactId: run.contact_id!,
+      text,
+    });
+    await logEvent(db, run.id, "message_sent", nodeKey, {
+      reason,
+      whatsapp_message_id,
+    });
+  } catch (err) {
+    await logEvent(db, run.id, "error", nodeKey, {
+      reason: `${reason}_send_failed`,
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Build the menu text for a `show_menu` node: reads the account
+ * currency + available items, renders the grouped block, and falls
+ * back to a short notice when the menu is empty (so the flow advances
+ * instead of sending a blank message). DB errors degrade to the
+ * fallback rather than throwing — the surrounding case still advances.
+ */
+async function composeMenuText(
+  db: AdminClient,
+  run: FlowRunRow,
+  cfg: ShowMenuNodeConfig,
+): Promise<string> {
+  let currency = DEFAULT_CURRENCY;
+  try {
+    const { data: account } = await db
+      .from("accounts")
+      .select("default_currency")
+      .eq("id", run.account_id)
+      .maybeSingle();
+    if (account?.default_currency) currency = account.default_currency;
+  } catch {
+    // Keep the default currency.
+  }
+
+  let items: MenuItem[] = [];
+  try {
+    const { data } = await db
+      .from("menu_items")
+      .select("*")
+      .eq("account_id", run.account_id)
+      .eq("is_available", true);
+    items = (data as MenuItem[] | null) ?? [];
+  } catch {
+    items = [];
+  }
+
+  const text = renderMenuText(items, {
+    currency,
+    introText: cfg.intro_text
+      ? interpolateVars(cfg.intro_text, run.vars)
+      : undefined,
+    includePrices: cfg.include_prices,
+    includeDescriptions: cfg.include_descriptions,
+  });
+  return (
+    text || "Our menu isn't available right now. Please check back soon."
+  );
+}
+
+/** How far ahead pick_date scans for open days before giving up. */
+const PICK_DATE_HORIZON_DAYS = 30;
+
+/**
+ * `pick_date` — offer the next open booking days as buttons, scanning
+ * forward from today (in the account timezone) and skipping any closed
+ * day. Today is only offered when it still has bookable time left. The
+ * button reply_id IS the ISO date, remembered in vars for validation.
+ * Routes to `no_dates_next` when no open day is found within the
+ * horizon.
+ */
+async function executePickDate(
+  db: AdminClient,
+  run: FlowRunRow,
+  node: FlowNodeRow,
+): Promise<BookingExec> {
+  const cfg = node.config as unknown as PickDateNodeConfig;
+  let tz: string;
+  try {
+    tz = await getAccountTimezone(db, run.account_id);
+  } catch {
+    tz = DEFAULT_BOOKING_TIMEZONE;
+  }
+  const now = getZonedNow(tz);
+  const todayIso = now.dateIso;
+  const daysToOffer = Math.min(
+    Math.max(cfg.days_to_offer && cfg.days_to_offer > 0 ? cfg.days_to_offer : 2, 1),
+    3,
+  );
+
+  const found: Array<{ iso: string; label: string }> = [];
+  for (
+    let i = 0;
+    i < PICK_DATE_HORIZON_DAYS && found.length < daysToOffer;
+    i++
+  ) {
+    const iso = addDaysIso(todayIso, i);
+    let closed = false;
+    let windows: Array<{ start: string; end: string }> = [];
+    try {
+      const avail = await getAccountAvailability(db, run.account_id, iso);
+      closed = avail.closed;
+      windows = avail.windows;
+    } catch {
+      // On a lookup error, skip the day rather than offering a date we
+      // can't show times for.
+      continue;
+    }
+    if (closed || windows.length === 0) continue;
+    // Today only counts if there's still bookable time ahead of now.
+    if (iso === todayIso && !hasOpenTimeRemaining(windows, now.time)) continue;
+    found.push({ iso, label: dateButtonLabel(iso, todayIso) });
+  }
+
+  if (found.length === 0) {
+    if (cfg.no_dates_next) return { kind: "advance", next: cfg.no_dates_next };
+    await sendBuiltinNotice(
+      db,
+      run,
+      node.node_key,
+      "no_open_days",
+      "Sorry, we don't have any open days available right now. Please try again later.",
+    );
+    return { kind: "complete" };
+  }
+
+  let waId: string;
+  try {
+    const r = await engineSendInteractiveButtons({
+      accountId: run.account_id,
+      userId: run.user_id,
+      conversationId: run.conversation_id!,
+      contactId: run.contact_id!,
+      bodyText: interpolateVars(cfg.text, run.vars),
+      headerText: cfg.header_text,
+      footerText: cfg.footer_text,
+      buttons: found.map((f) => ({ id: f.iso, title: f.label })),
+    });
+    waId = r.whatsapp_message_id;
+  } catch (err) {
+    return {
+      kind: "fail",
+      reason: err instanceof Error ? err.message : "pick_date_send_failed",
+    };
+  }
+  await logEvent(db, run.id, "message_sent", node.node_key, {
+    node_type: "pick_date",
+    whatsapp_message_id: waId,
+    days: found.length,
+  });
+  await persistOfferedAndPrompt(
+    db,
+    run,
+    { [OFFERED_DATES_KEY]: found.map((f) => f.iso) },
+    waId,
+  );
+  return { kind: "suspend" };
+}
+
+/**
+ * `check_availability` — resolve open times for the chosen date and
+ * send them as a list. Routes to `unavailable_next` when the date is
+ * closed or has no remaining times.
+ */
+async function executeCheckAvailability(
+  db: AdminClient,
+  run: FlowRunRow,
+  node: FlowNodeRow,
+): Promise<BookingExec> {
+  const cfg = node.config as unknown as CheckAvailabilityNodeConfig;
+  // Routes to the configured branch, or sends a built-in apology and
+  // ends the run when no branch is wired.
+  const noTimes = async (): Promise<BookingExec> => {
+    if (cfg.unavailable_next) {
+      return { kind: "advance", next: cfg.unavailable_next };
+    }
+    await sendBuiltinNotice(
+      db,
+      run,
+      node.node_key,
+      "no_times",
+      "Sorry, there are no available times for that day. Reply to start again.",
+    );
+    return { kind: "complete" };
+  };
+
+  const dateIso = strVar(run.vars[cfg.date_var]);
+  if (!dateIso) return noTimes();
+
+  let tz: string;
+  try {
+    tz = await getAccountTimezone(db, run.account_id);
+  } catch {
+    tz = DEFAULT_BOOKING_TIMEZONE;
+  }
+
+  let windows: Array<{ start: string; end: string }>;
+  try {
+    const avail = await getAccountAvailability(db, run.account_id, dateIso);
+    if (avail.closed || avail.windows.length === 0) {
+      return noTimes();
+    }
+    windows = avail.windows;
+  } catch (err) {
+    return {
+      kind: "fail",
+      reason: err instanceof Error ? err.message : "availability_failed",
+    };
+  }
+
+  // Hide already-passed times when the chosen date is today.
+  const now = getZonedNow(tz);
+  const notBefore = dateIso === now.dateIso ? now.time : undefined;
+  const cap = Math.min(
+    cfg.max_options && cfg.max_options > 0 ? cfg.max_options : 10,
+    10,
+  );
+  const times = enumerateStartTimes(
+    windows,
+    cfg.slot_interval_minutes,
+    notBefore,
+  ).slice(0, cap);
+  if (times.length === 0) {
+    return noTimes();
+  }
+
+  let waId: string;
+  try {
+    const r = await engineSendInteractiveList({
+      accountId: run.account_id,
+      userId: run.user_id,
+      conversationId: run.conversation_id!,
+      contactId: run.contact_id!,
+      bodyText: interpolateVars(cfg.text, run.vars),
+      buttonLabel: cfg.button_label || "View times",
+      headerText: cfg.header_text,
+      footerText: cfg.footer_text,
+      sections: [
+        {
+          title: "Available times",
+          rows: times.map((t) => ({ id: t, title: formatTime12(t) })),
+        },
+      ],
+    });
+    waId = r.whatsapp_message_id;
+  } catch (err) {
+    return {
+      kind: "fail",
+      reason:
+        err instanceof Error ? err.message : "check_availability_send_failed",
+    };
+  }
+  await logEvent(db, run.id, "message_sent", node.node_key, {
+    node_type: "check_availability",
+    whatsapp_message_id: waId,
+    options: times.length,
+  });
+  await persistOfferedAndPrompt(db, run, { [OFFERED_TIMES_KEY]: times }, waId);
+  return { kind: "suspend" };
+}
+
+/**
+ * `create_reservation` — write the booking and route success/error.
+ * Always auto-advances (never suspends); a booking failure routes to
+ * `error_next` rather than failing the whole run.
+ */
+async function executeCreateReservation(
+  db: AdminClient,
+  run: FlowRunRow,
+  node: FlowNodeRow,
+): Promise<BookingExec> {
+  const cfg = node.config as unknown as CreateReservationNodeConfig;
+  const dateIso = strVar(run.vars[cfg.date_var]);
+  const startTime = strVar(run.vars[cfg.time_var]);
+  const partySize = parseInt(strVar(run.vars[cfg.party_size_var]), 10);
+  const guestName = cfg.guest_name_var
+    ? strVar(run.vars[cfg.guest_name_var])
+    : undefined;
+  const notes = cfg.notes_template
+    ? interpolateVars(cfg.notes_template, run.vars)
+    : null;
+
+  const result = await createReservationFromFlow(db, {
+    accountId: run.account_id,
+    userId: run.user_id,
+    contactId: run.contact_id!,
+    reservationDate: dateIso,
+    startTime,
+    partySize,
+    status: cfg.reservation_status || "pending",
+    guestName: guestName || undefined,
+    notes,
+  });
+
+  if (!result.ok) {
+    await logEvent(db, run.id, "error", node.node_key, {
+      node_type: "create_reservation",
+      reason: "booking_failed",
+      detail: result.error,
+    });
+    if (cfg.error_next) return { kind: "advance", next: cfg.error_next };
+    await sendBuiltinNotice(
+      db,
+      run,
+      node.node_key,
+      "booking_failed",
+      "Sorry, we couldn't complete that booking. Please reply to try again.",
+    );
+    return { kind: "complete" };
+  }
+
+  const newVars = { ...run.vars, reservation_id: result.reservationId };
+  await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
+  run.vars = newVars;
+  await logEvent(db, run.id, "node_entered", node.node_key, {
+    node_type: "create_reservation",
+    reservation_id: result.reservationId,
+  });
+  if (cfg.success_next) return { kind: "advance", next: cfg.success_next };
+  // No confirmation node wired — send a built-in confirmation so the
+  // block is fully self-contained.
+  const guests = Number.isFinite(partySize) && partySize > 0 ? partySize : null;
+  const parts = [
+    "You're booked",
+    dateIso ? `for ${shortDayLabel(dateIso)}` : null,
+    startTime ? `at ${formatTime12(startTime)}` : null,
+    guests ? `for ${guests} ${guests === 1 ? "guest" : "guests"}` : null,
+  ].filter(Boolean);
+  await sendBuiltinNotice(
+    db,
+    run,
+    node.node_key,
+    "booking_confirmed",
+    `${parts.join(" ")}. See you then!`,
+  );
+  return { kind: "complete" };
+}
+
 async function executeHandoff(
   db: AdminClient,
   run: FlowRunRow,
@@ -521,6 +957,33 @@ function interpolateVars(template: string, vars: Record<string, unknown>): strin
   });
 }
 
+/**
+ * Capture a booking node's tapped option (ISO date / "HH:MM" time)
+ * into a var and reset the reprompt count. Mirrors the collect_input
+ * capture: writes vars, mirrors in-memory, and returns the node's
+ * single advance target (or null on a DB error).
+ */
+async function captureBookingVar(
+  db: AdminClient,
+  run: FlowRunRow,
+  varKey: string,
+  value: string,
+  nextKey: string,
+): Promise<string | null> {
+  const newVars = { ...run.vars, [varKey]: value };
+  const { error } = await db
+    .from("flow_runs")
+    .update({ vars: newVars, reprompt_count: 0 })
+    .eq("id", run.id);
+  if (error) return null;
+  run.vars = newVars;
+  run.reprompt_count = 0;
+  await logEvent(db, run.id, "node_entered", run.current_node_key, {
+    captured_key: varKey,
+  });
+  return nextKey;
+}
+
 async function endRun(
   db: AdminClient,
   runId: string,
@@ -597,6 +1060,31 @@ async function advanceFromNodeKey(
           detail: err instanceof Error ? err.message : String(err),
         });
         await endRun(db, run.id, "failed", "send_text_failed");
+        return { outcome: "completed" };
+      }
+      currentKey = cfg.next_node_key;
+      continue;
+    }
+    if (node.node_type === "show_menu") {
+      const cfg = node.config as unknown as ShowMenuNodeConfig;
+      try {
+        const { whatsapp_message_id } = await engineSendText({
+          accountId: run.account_id,
+          userId: run.user_id,
+          conversationId: run.conversation_id!,
+          contactId: run.contact_id!,
+          text: await composeMenuText(db, run, cfg),
+        });
+        await logEvent(db, run.id, "message_sent", node.node_key, {
+          node_type: "show_menu",
+          whatsapp_message_id,
+        });
+      } catch (err) {
+        await logEvent(db, run.id, "error", node.node_key, {
+          reason: "show_menu_send_failed",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+        await endRun(db, run.id, "failed", "show_menu_send_failed");
         return { outcome: "completed" };
       }
       currentKey = cfg.next_node_key;
@@ -762,6 +1250,58 @@ async function advanceFromNodeKey(
         });
       }
       return { outcome: "advanced" };
+    }
+    if (
+      node.node_type === "pick_date" ||
+      node.node_type === "check_availability"
+    ) {
+      const r: BookingExec =
+        node.node_type === "pick_date"
+          ? await executePickDate(db, run, node)
+          : await executeCheckAvailability(db, run, node);
+      if (r.kind === "fail") {
+        await endRun(db, run.id, "failed", `${node.node_type}_failed`);
+        return { outcome: "completed" };
+      }
+      if (r.kind === "complete") {
+        // A built-in "nothing available" notice was already sent.
+        await endRun(db, run.id, "completed", `${node.node_type}_no_options`);
+        return { outcome: "completed" };
+      }
+      if (r.kind === "advance") {
+        // Routed to a branch (no open days / no times) without
+        // suspending — keep walking the graph.
+        currentKey = r.next;
+        continue;
+      }
+      // Suspended awaiting the customer's tap — persist the pointer.
+      const advanced = await advanceCurrentNodeKey(
+        db,
+        run.id,
+        run.current_node_key,
+        node.node_key,
+      );
+      if (!advanced) {
+        await logEvent(db, run.id, "error", node.node_key, {
+          reason: "lost_race_during_advance",
+        });
+      }
+      return { outcome: "advanced" };
+    }
+    if (node.node_type === "create_reservation") {
+      const r = await executeCreateReservation(db, run, node);
+      if (r.kind === "fail") {
+        await endRun(db, run.id, "failed", "create_reservation_failed");
+        return { outcome: "completed" };
+      }
+      if (r.kind === "complete") {
+        // Built-in confirmation/apology already sent — end the run.
+        await endRun(db, run.id, "completed", "create_reservation_done");
+        return { outcome: "completed" };
+      }
+      // Otherwise route to the wired success/error branch.
+      currentKey = r.kind === "advance" ? r.next : null;
+      continue;
     }
     if (node.node_type === "handoff") {
       await executeHandoff(db, run, node);
@@ -930,6 +1470,61 @@ async function handleReplyForActiveRun(
       currentNode.node_type === "send_list")
   ) {
     matched = matchReplyId(currentNode, message.reply_id);
+    // Optional capture: remember which option was tapped so a button /
+    // list choice (e.g. party size) can feed downstream booking nodes.
+    const captureVar = (currentNode.config as { capture_var?: string })
+      .capture_var;
+    if (
+      matched &&
+      captureVar &&
+      /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(captureVar)
+    ) {
+      const newVars = { ...run.vars, [captureVar]: message.reply_id };
+      const { error: capErr } = await db
+        .from("flow_runs")
+        .update({ vars: newVars })
+        .eq("id", run.id);
+      if (!capErr) {
+        run.vars = newVars;
+        await logEvent(db, run.id, "node_entered", currentNode.node_key, {
+          captured_key: captureVar,
+        });
+      }
+    }
+  } else if (
+    message.kind === "interactive_reply" &&
+    currentNode.node_type === "pick_date"
+  ) {
+    const cfg = currentNode.config as unknown as PickDateNodeConfig;
+    const offered = Array.isArray(run.vars[OFFERED_DATES_KEY])
+      ? (run.vars[OFFERED_DATES_KEY] as string[])
+      : [];
+    if (offered.includes(message.reply_id)) {
+      matched = await captureBookingVar(
+        db,
+        run,
+        cfg.output_var,
+        message.reply_id,
+        cfg.next_node_key,
+      );
+    }
+  } else if (
+    message.kind === "interactive_reply" &&
+    currentNode.node_type === "check_availability"
+  ) {
+    const cfg = currentNode.config as unknown as CheckAvailabilityNodeConfig;
+    const offered = Array.isArray(run.vars[OFFERED_TIMES_KEY])
+      ? (run.vars[OFFERED_TIMES_KEY] as string[])
+      : [];
+    if (offered.includes(message.reply_id)) {
+      matched = await captureBookingVar(
+        db,
+        run,
+        cfg.output_var,
+        message.reply_id,
+        cfg.next_node_key,
+      );
+    }
   } else if (
     message.kind === "text" &&
     currentNode.node_type === "collect_input"
@@ -1009,6 +1604,13 @@ async function handleReplyForActiveRun(
       await sendButtonsAndSuspend(db, run, currentNode);
     } else if (currentNode.node_type === "send_list") {
       await sendListAndSuspend(db, run, currentNode);
+    } else if (currentNode.node_type === "pick_date") {
+      // Re-offer the same date choices. Ignore the result: a rare
+      // "no open days now" route won't re-send, leaving the prompt
+      // unchanged — acceptable for a reprompt.
+      await executePickDate(db, run, currentNode);
+    } else if (currentNode.node_type === "check_availability") {
+      await executeCheckAvailability(db, run, currentNode);
     } else if (currentNode.node_type === "collect_input") {
       // Customer typed something we couldn't accept (empty after trim,
       // or var_key missing — rare). Re-send the prompt so they try again.

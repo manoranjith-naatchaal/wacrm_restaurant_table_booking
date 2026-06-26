@@ -182,6 +182,42 @@ export function defaultConfigFor(type: NodeType): Record<string, unknown> {
       };
     case "set_tag":
       return { mode: "add", tag_id: "", next_node_key: "" };
+    case "pick_date":
+      return {
+        text: "Which day would you like to book?",
+        days_to_offer: 2,
+        output_var: "booking_date",
+        next_node_key: "",
+      };
+    case "check_availability":
+      return {
+        date_var: "booking_date",
+        text: "Here are the available times. Pick one:",
+        button_label: "View times",
+        slot_interval_minutes: 30,
+        max_options: 10,
+        output_var: "booking_time",
+        next_node_key: "",
+      };
+    case "create_reservation":
+      return {
+        date_var: "booking_date",
+        time_var: "booking_time",
+        party_size_var: "party_size",
+        reservation_status: "pending",
+        // Reads vars.guest_name (set by a "collect input" name step) so
+        // WhatsApp bookings save a real guest name instead of falling
+        // back to the phone number. Harmlessly ignored when absent.
+        guest_name_var: "guest_name",
+        notes_template: "Booked via WhatsApp",
+      };
+    case "show_menu":
+      return {
+        intro_text: "Here's our menu:",
+        include_prices: true,
+        include_descriptions: true,
+        next_node_key: "",
+      };
     case "handoff":
       return { note: "" };
     case "end":

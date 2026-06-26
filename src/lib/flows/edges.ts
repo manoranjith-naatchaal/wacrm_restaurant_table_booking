@@ -48,7 +48,8 @@ export function deriveCanvasEdges(nodes: BuilderNode[]): CanvasEdge[] {
       case "send_message":
       case "send_media":
       case "collect_input":
-      case "set_tag": {
+      case "set_tag":
+      case "show_menu": {
         const next = (cfg as { next_node_key?: string }).next_node_key;
         if (next && knownKeys.has(next)) {
           edges.push({
@@ -138,6 +139,79 @@ export function deriveCanvasEdges(nodes: BuilderNode[]): CanvasEdge[] {
         break;
       }
 
+      case "pick_date": {
+        const next = (cfg as { next_node_key?: string }).next_node_key;
+        const noDates = (cfg as { no_dates_next?: string }).no_dates_next;
+        if (next && knownKeys.has(next)) {
+          edges.push({
+            id: `${node.node_key}--next--${next}`,
+            source: node.node_key,
+            target: next,
+            sourceHandle: "next",
+            label: "date picked",
+          });
+        }
+        if (noDates && knownKeys.has(noDates)) {
+          edges.push({
+            id: `${node.node_key}--no_dates--${noDates}`,
+            source: node.node_key,
+            target: noDates,
+            sourceHandle: "no_dates",
+            label: "no open days",
+          });
+        }
+        break;
+      }
+
+      case "check_availability": {
+        const next = (cfg as { next_node_key?: string }).next_node_key;
+        const unavailable = (cfg as { unavailable_next?: string })
+          .unavailable_next;
+        if (next && knownKeys.has(next)) {
+          edges.push({
+            id: `${node.node_key}--next--${next}`,
+            source: node.node_key,
+            target: next,
+            sourceHandle: "next",
+            label: "time picked",
+          });
+        }
+        if (unavailable && knownKeys.has(unavailable)) {
+          edges.push({
+            id: `${node.node_key}--unavailable--${unavailable}`,
+            source: node.node_key,
+            target: unavailable,
+            sourceHandle: "unavailable",
+            label: "no times",
+          });
+        }
+        break;
+      }
+
+      case "create_reservation": {
+        const success = (cfg as { success_next?: string }).success_next;
+        const error = (cfg as { error_next?: string }).error_next;
+        if (success && knownKeys.has(success)) {
+          edges.push({
+            id: `${node.node_key}--success--${success}`,
+            source: node.node_key,
+            target: success,
+            sourceHandle: "success",
+            label: "booked",
+          });
+        }
+        if (error && knownKeys.has(error)) {
+          edges.push({
+            id: `${node.node_key}--error--${error}`,
+            source: node.node_key,
+            target: error,
+            sourceHandle: "error",
+            label: "failed",
+          });
+        }
+        break;
+      }
+
       case "handoff":
       case "end":
         // Terminal nodes — no outgoing edges.
@@ -179,6 +253,7 @@ export function outgoingSlots(node: BuilderNode): OutgoingSlot[] {
     case "send_media":
     case "collect_input":
     case "set_tag":
+    case "show_menu":
       return [{ id: "next", label: "Next" }];
 
     case "condition":
@@ -226,6 +301,24 @@ export function outgoingSlots(node: BuilderNode): OutgoingSlot[] {
       return slots;
     }
 
+    case "pick_date":
+      return [
+        { id: "next", label: "Date picked" },
+        { id: "no_dates", label: "No open days" },
+      ];
+
+    case "check_availability":
+      return [
+        { id: "next", label: "Time picked" },
+        { id: "unavailable", label: "No times" },
+      ];
+
+    case "create_reservation":
+      return [
+        { id: "success", label: "Booked" },
+        { id: "error", label: "Failed" },
+      ];
+
     case "handoff":
     case "end":
       return [];
@@ -253,6 +346,7 @@ export function applyEdgeConnection(
     case "send_media":
     case "collect_input":
     case "set_tag":
+    case "show_menu":
       if (sourceHandle === "next") return { next_node_key: targetKey };
       return null;
 
@@ -310,6 +404,22 @@ export function applyEdgeConnection(
       return matched ? { sections: next } : null;
     }
 
+    case "pick_date":
+      if (sourceHandle === "next") return { next_node_key: targetKey };
+      if (sourceHandle === "no_dates") return { no_dates_next: targetKey };
+      return null;
+
+    case "check_availability":
+      if (sourceHandle === "next") return { next_node_key: targetKey };
+      if (sourceHandle === "unavailable")
+        return { unavailable_next: targetKey };
+      return null;
+
+    case "create_reservation":
+      if (sourceHandle === "success") return { success_next: targetKey };
+      if (sourceHandle === "error") return { error_next: targetKey };
+      return null;
+
     case "handoff":
     case "end":
       return null;
@@ -346,7 +456,8 @@ function patchedConfigWithoutKey(
     case "send_message":
     case "send_media":
     case "collect_input":
-    case "set_tag": {
+    case "set_tag":
+    case "show_menu": {
       const next = (cfg as { next_node_key?: string }).next_node_key;
       if (next !== deletedKey) return null;
       return { ...cfg, next_node_key: "" };
@@ -402,6 +513,42 @@ function patchedConfigWithoutKey(
         };
       });
       return dirty ? { ...cfg, sections: next } : null;
+    }
+
+    case "pick_date": {
+      const c = cfg as { next_node_key?: string; no_dates_next?: string };
+      const nextMatch = c.next_node_key === deletedKey;
+      const noDatesMatch = c.no_dates_next === deletedKey;
+      if (!nextMatch && !noDatesMatch) return null;
+      return {
+        ...cfg,
+        ...(nextMatch ? { next_node_key: "" } : {}),
+        ...(noDatesMatch ? { no_dates_next: "" } : {}),
+      };
+    }
+
+    case "check_availability": {
+      const c = cfg as { next_node_key?: string; unavailable_next?: string };
+      const nextMatch = c.next_node_key === deletedKey;
+      const unavailMatch = c.unavailable_next === deletedKey;
+      if (!nextMatch && !unavailMatch) return null;
+      return {
+        ...cfg,
+        ...(nextMatch ? { next_node_key: "" } : {}),
+        ...(unavailMatch ? { unavailable_next: "" } : {}),
+      };
+    }
+
+    case "create_reservation": {
+      const c = cfg as { success_next?: string; error_next?: string };
+      const successMatch = c.success_next === deletedKey;
+      const errorMatch = c.error_next === deletedKey;
+      if (!successMatch && !errorMatch) return null;
+      return {
+        ...cfg,
+        ...(successMatch ? { success_next: "" } : {}),
+        ...(errorMatch ? { error_next: "" } : {}),
+      };
     }
 
     case "handoff":

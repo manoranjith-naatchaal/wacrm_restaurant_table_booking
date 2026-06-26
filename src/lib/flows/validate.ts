@@ -25,6 +25,21 @@
 
 import { INTERACTIVE_LIMITS } from "@/lib/whatsapp/meta-api";
 
+/** Reservation statuses a bot-created booking may use. */
+const RESERVATION_STATUSES = [
+  "pending",
+  "confirmed",
+  "seated",
+  "completed",
+  "cancelled",
+  "no_show",
+];
+
+/** Same var-name shape collect_input enforces. */
+function isVarKey(value: string): boolean {
+  return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(value);
+}
+
 export interface ValidationIssue {
   severity: "error" | "warning";
   scope: "flow" | "trigger" | "node";
@@ -319,6 +334,16 @@ function validateNode(
           message: "Send-buttons node needs a text body.",
         });
       }
+      const btnCapture = (node.config as { capture_var?: string }).capture_var;
+      if (btnCapture && btnCapture.trim() && !isVarKey(btnCapture)) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "capture_var",
+          message: `capture_var "${btnCapture}" must be alphanumeric+underscore and start with a letter or underscore.`,
+        });
+      }
       const btns = cfg.buttons ?? [];
       if (btns.length < 1) {
         issues.push({
@@ -429,6 +454,16 @@ function validateNode(
           node_key: node.node_key,
           field: "button_label",
           message: "Send-list needs a button label (the tap-to-expand text).",
+        });
+      }
+      const listCapture = (node.config as { capture_var?: string }).capture_var;
+      if (listCapture && listCapture.trim() && !isVarKey(listCapture)) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "capture_var",
+          message: `capture_var "${listCapture}" must be alphanumeric+underscore and start with a letter or underscore.`,
         });
       }
       const sections = cfg.sections ?? [];
@@ -701,6 +736,307 @@ function validateNode(
       break;
     }
 
+    case "pick_date": {
+      const cfg = node.config as {
+        text?: string;
+        days_to_offer?: number;
+        output_var?: string;
+        next_node_key?: string;
+        no_dates_next?: string;
+      };
+      if (!cfg.text?.trim()) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "text",
+          message: "Pick-date node needs a prompt body.",
+        });
+      }
+      if (
+        cfg.days_to_offer !== undefined &&
+        (!Number.isInteger(cfg.days_to_offer) ||
+          cfg.days_to_offer < 1 ||
+          cfg.days_to_offer > INTERACTIVE_LIMITS.maxButtons)
+      ) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "days_to_offer",
+          message: `Days to offer must be between 1 and ${INTERACTIVE_LIMITS.maxButtons}.`,
+        });
+      }
+      if (!cfg.output_var?.trim()) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "output_var",
+          message: "Pick-date needs an output_var to store the chosen date.",
+        });
+      } else if (!isVarKey(cfg.output_var)) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "output_var",
+          message: `output_var "${cfg.output_var}" must be alphanumeric+underscore and start with a letter or underscore.`,
+        });
+      }
+      if (!cfg.next_node_key) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "next_node_key",
+          message: "Pick-date must point to a next node.",
+        });
+      } else if (!knownKeys.has(cfg.next_node_key)) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "next_node_key",
+          message: `Pick-date points to non-existent node "${cfg.next_node_key}".`,
+        });
+      }
+      // Optional safety branch for the rare "no open day within the
+      // horizon" case — a built-in apology covers it when unset.
+      if (cfg.no_dates_next && !knownKeys.has(cfg.no_dates_next)) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "no_dates_next",
+          message: `Pick-date's no-dates branch points to non-existent node "${cfg.no_dates_next}".`,
+        });
+      }
+      break;
+    }
+
+    case "check_availability": {
+      const cfg = node.config as {
+        date_var?: string;
+        text?: string;
+        button_label?: string;
+        slot_interval_minutes?: number;
+        max_options?: number;
+        output_var?: string;
+        next_node_key?: string;
+        unavailable_next?: string;
+      };
+      if (!cfg.date_var?.trim()) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "date_var",
+          message: "Check-availability needs a date_var (set by an earlier pick-date).",
+        });
+      } else if (!isVarKey(cfg.date_var)) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "date_var",
+          message: `date_var "${cfg.date_var}" must be alphanumeric+underscore and start with a letter or underscore.`,
+        });
+      }
+      if (!cfg.text?.trim()) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "text",
+          message: "Check-availability node needs a prompt body.",
+        });
+      }
+      if (!cfg.button_label?.trim()) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "button_label",
+          message: "Check-availability needs a list button label.",
+        });
+      }
+      if (
+        typeof cfg.slot_interval_minutes !== "number" ||
+        !Number.isInteger(cfg.slot_interval_minutes) ||
+        cfg.slot_interval_minutes <= 0
+      ) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "slot_interval_minutes",
+          message: "Check-availability needs a positive interval (minutes between times).",
+        });
+      }
+      if (
+        cfg.max_options !== undefined &&
+        (!Number.isInteger(cfg.max_options) ||
+          cfg.max_options < 1 ||
+          cfg.max_options > INTERACTIVE_LIMITS.maxListRowsTotal)
+      ) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "max_options",
+          message: `Max options must be between 1 and ${INTERACTIVE_LIMITS.maxListRowsTotal}.`,
+        });
+      }
+      if (!cfg.output_var?.trim()) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "output_var",
+          message: "Check-availability needs an output_var to store the chosen time.",
+        });
+      } else if (!isVarKey(cfg.output_var)) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "output_var",
+          message: `output_var "${cfg.output_var}" must be alphanumeric+underscore and start with a letter or underscore.`,
+        });
+      }
+      if (!cfg.next_node_key) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "next_node_key",
+          message: "Check-availability must point to a next node.",
+        });
+      } else if (!knownKeys.has(cfg.next_node_key)) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "next_node_key",
+          message: `Check-availability points to non-existent node "${cfg.next_node_key}".`,
+        });
+      }
+      // Optional no-times branch — a built-in apology covers it when
+      // unset (and pick_date already only offers open days).
+      if (cfg.unavailable_next && !knownKeys.has(cfg.unavailable_next)) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "unavailable_next",
+          message: `Check-availability's no-times branch points to non-existent node "${cfg.unavailable_next}".`,
+        });
+      }
+      break;
+    }
+
+    case "create_reservation": {
+      const cfg = node.config as {
+        date_var?: string;
+        time_var?: string;
+        party_size_var?: string;
+        reservation_status?: string;
+        guest_name_var?: string;
+        success_next?: string;
+        error_next?: string;
+      };
+      const reqVars: Array<["date_var" | "time_var" | "party_size_var", string]> = [
+        ["date_var", "date"],
+        ["time_var", "time"],
+        ["party_size_var", "party size"],
+      ];
+      for (const [field, label] of reqVars) {
+        const v = cfg[field];
+        if (!v?.trim()) {
+          issues.push({
+            severity: "error",
+            scope: "node",
+            node_key: node.node_key,
+            field,
+            message: `Create-reservation needs a var holding the ${label}.`,
+          });
+        } else if (!isVarKey(v)) {
+          issues.push({
+            severity: "error",
+            scope: "node",
+            node_key: node.node_key,
+            field,
+            message: `${field} "${v}" must be alphanumeric+underscore and start with a letter or underscore.`,
+          });
+        }
+      }
+      if (
+        cfg.guest_name_var &&
+        cfg.guest_name_var.trim() &&
+        !isVarKey(cfg.guest_name_var)
+      ) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "guest_name_var",
+          message: `guest_name_var "${cfg.guest_name_var}" must be alphanumeric+underscore and start with a letter or underscore.`,
+        });
+      }
+      if (
+        cfg.reservation_status &&
+        !RESERVATION_STATUSES.includes(cfg.reservation_status)
+      ) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "reservation_status",
+          message: `Invalid reservation status "${cfg.reservation_status}".`,
+        });
+      }
+      // Both branches are optional — built-in confirmation/apology
+      // messages cover them when unset. Validate only when wired.
+      for (const branch of ["success_next", "error_next"] as const) {
+        const key = cfg[branch];
+        if (key && !knownKeys.has(key)) {
+          issues.push({
+            severity: "error",
+            scope: "node",
+            node_key: node.node_key,
+            field: branch,
+            message: `Create-reservation's "${branch}" points to non-existent node "${key}".`,
+          });
+        }
+      }
+      break;
+    }
+
+    case "show_menu": {
+      // Only the forward edge needs validating — text is composed at
+      // send time from the account's menu, so there's no body to check.
+      const cfg = node.config as { next_node_key?: string };
+      if (!cfg.next_node_key) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "next_node_key",
+          message: "Show-menu node must point to a next node.",
+        });
+      } else if (!knownKeys.has(cfg.next_node_key)) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "next_node_key",
+          message: `Show-menu points to non-existent node "${cfg.next_node_key}".`,
+        });
+      }
+      break;
+    }
+
     case "handoff":
     case "end":
       // Terminal nodes have no outgoing edges; nothing to validate
@@ -751,7 +1087,8 @@ function outgoingEdges(node: NodeInput): string[] {
     case "send_message":
     case "send_media":
     case "collect_input":
-    case "set_tag": {
+    case "set_tag":
+    case "show_menu": {
       const cfg = node.config as { next_node_key?: string };
       return cfg.next_node_key ? [cfg.next_node_key] : [];
     }
@@ -783,6 +1120,36 @@ function outgoingEdges(node: NodeInput): string[] {
           if (r.next_node_key) out.push(r.next_node_key);
         }
       }
+      return out;
+    }
+    case "pick_date": {
+      const cfg = node.config as {
+        next_node_key?: string;
+        no_dates_next?: string;
+      };
+      const out: string[] = [];
+      if (cfg.next_node_key) out.push(cfg.next_node_key);
+      if (cfg.no_dates_next) out.push(cfg.no_dates_next);
+      return out;
+    }
+    case "check_availability": {
+      const cfg = node.config as {
+        next_node_key?: string;
+        unavailable_next?: string;
+      };
+      const out: string[] = [];
+      if (cfg.next_node_key) out.push(cfg.next_node_key);
+      if (cfg.unavailable_next) out.push(cfg.unavailable_next);
+      return out;
+    }
+    case "create_reservation": {
+      const cfg = node.config as {
+        success_next?: string;
+        error_next?: string;
+      };
+      const out: string[] = [];
+      if (cfg.success_next) out.push(cfg.success_next);
+      if (cfg.error_next) out.push(cfg.error_next);
       return out;
     }
     case "handoff":
