@@ -1,12 +1,12 @@
 name: DB Migrate
 
 # Applies Supabase migrations to the linked (production) project.
-# Runs only when migration files change on main — kept deliberately
+# Runs only when migration files change on prod — kept deliberately
 # separate from the app deploy so schema changes are a controlled,
 # one-time action rather than something that fires on every build.
 on:
   push:
-    branches: [main]
+    branches: [prod]
     paths:
       - 'supabase/migrations/**'
   # Allow running it by hand from the Actions tab when needed.
