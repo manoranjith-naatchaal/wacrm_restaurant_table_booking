@@ -3,9 +3,11 @@ import {
   addDaysIso,
   dateButtonLabel,
   enumerateStartTimes,
+  formatLongDate,
   formatTime12,
   getZonedNow,
   hasOpenTimeRemaining,
+  sampleEvenly,
   shortDayLabel,
 } from "./booking";
 
@@ -130,5 +132,42 @@ describe("hasOpenTimeRemaining", () => {
   it("false when every window has already ended", () => {
     expect(hasOpenTimeRemaining(windows, "22:00")).toBe(false);
     expect(hasOpenTimeRemaining(windows, "23:00")).toBe(false);
+  });
+});
+
+describe("formatLongDate", () => {
+  it("formats as D-Month-YYYY", () => {
+    expect(formatLongDate("2026-06-20")).toBe("20-June-2026");
+    expect(formatLongDate("2026-01-05")).toBe("5-January-2026");
+    expect(formatLongDate("2026-12-31")).toBe("31-December-2026");
+  });
+  it("returns the input unchanged when not a valid iso date", () => {
+    expect(formatLongDate("nope")).toBe("nope");
+    expect(formatLongDate("2026-13-01")).toBe("2026-13-01");
+  });
+});
+
+describe("sampleEvenly", () => {
+  it("returns the list unchanged when within the cap", () => {
+    expect(sampleEvenly(["a", "b", "c"], 5)).toEqual(["a", "b", "c"]);
+    expect(sampleEvenly(["a", "b", "c"], 3)).toEqual(["a", "b", "c"]);
+  });
+
+  it("spreads across the whole range, always keeping first and last", () => {
+    // 7am–9pm at 30-min steps → 28 candidates; capped to WhatsApp's 10
+    // rows should still reach the evening, not stop at the morning.
+    const times = enumerateStartTimes([{ start: "07:00", end: "21:00" }], 30);
+    const picked = sampleEvenly(times, 10);
+    expect(picked).toHaveLength(10);
+    expect(picked[0]).toBe("07:00");
+    expect(picked[picked.length - 1]).toBe("20:30");
+    // Strictly increasing — no duplicates, order preserved.
+    for (let i = 1; i < picked.length; i++) {
+      expect(picked[i] > picked[i - 1]).toBe(true);
+    }
+  });
+
+  it("handles a zero/negative cap", () => {
+    expect(sampleEvenly(["a", "b"], 0)).toEqual([]);
   });
 });

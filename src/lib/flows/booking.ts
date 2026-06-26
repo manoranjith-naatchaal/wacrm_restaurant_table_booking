@@ -104,6 +104,32 @@ export function formatTime12(value: string): string {
   return `${h12}:${String(m).padStart(2, "0")} ${period}`;
 }
 
+const MONTHS_LONG = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+/**
+ * "2026-06-20" → "20-June-2026". Built from a fixed month array (not
+ * Intl) so the format is stable across locales, and computed by simple
+ * splitting so there's no timezone shift.
+ */
+export function formatLongDate(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d || m < 1 || m > 12) return iso;
+  return `${d}-${MONTHS_LONG[m - 1]}-${y}`;
+}
+
 function toMin(t: string): number {
   const [h, m] = t.split(":");
   return Number(h) * 60 + Number(m);
@@ -165,6 +191,27 @@ export function enumerateStartTimes(
     }
   }
   return out.sort((a, b) => a - b).map(toHHMM);
+}
+
+/**
+ * Down-sample a sorted list to at most `cap` items, spread evenly from
+ * first to last (both endpoints always kept). WhatsApp interactive
+ * lists allow a hard max of 10 rows, so for a wide open window (e.g.
+ * 7am–10pm at 30-min steps = 30+ candidates) taking the *first* 10
+ * would only ever surface the morning. Sampling across the range keeps
+ * the offered times spanning the whole day. Items stay grid-aligned
+ * because we only pick from the existing list.
+ */
+export function sampleEvenly<T>(items: T[], cap: number): T[] {
+  if (cap <= 0) return [];
+  if (items.length <= cap) return items.slice();
+  const step = (items.length - 1) / (cap - 1);
+  const out: T[] = [];
+  for (let i = 0; i < cap; i++) {
+    out.push(items[Math.round(i * step)]);
+  }
+  // Rounding can collide on small inputs — de-dup while preserving order.
+  return Array.from(new Set(out));
 }
 
 // ============================================================

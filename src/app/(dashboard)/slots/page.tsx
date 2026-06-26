@@ -70,8 +70,8 @@ interface FormState {
 
 const EMPTY_FORM: FormState = {
   day_of_week: '1',
-  start_time: '19:00',
-  end_time: '21:00',
+  start_time: '07:00',
+  end_time: '22:00',
   is_active: true,
 };
 

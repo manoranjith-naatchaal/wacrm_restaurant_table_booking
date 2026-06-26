@@ -375,7 +375,7 @@ const BOOK_A_TABLE: FlowTemplate = {
       node_key: "confirm",
       node_type: "send_buttons",
       config: {
-        text: "Please confirm — {{vars.guest_name}}, {{vars.party_size}} guests on {{vars.booking_date}} at {{vars.booking_time}}.",
+        text: "Please confirm — {{vars.guest_name}}, {{vars.party_size}} guests on {{vars.booking_date_label}} at {{vars.booking_time_label}}.",
         buttons: [
           { reply_id: "yes", title: "Confirm", next_node_key: "book" },
           { reply_id: "no", title: "Start over", next_node_key: "ask_party" },
@@ -399,7 +399,7 @@ const BOOK_A_TABLE: FlowTemplate = {
       node_key: "done",
       node_type: "send_message",
       config: {
-        text: "🎉 You're booked, {{vars.guest_name}}! Table for {{vars.party_size}} on {{vars.booking_date}} at {{vars.booking_time}}. See you soon!",
+        text: "🎉 You're booked, {{vars.guest_name}}! Table for {{vars.party_size}} on {{vars.booking_date_label}} at {{vars.booking_time_label}}. See you soon!",
         next_node_key: "end",
       } as SendMessageNodeConfig,
     },
@@ -538,7 +538,7 @@ const RESTAURANT_HUB: FlowTemplate = {
       node_key: "confirm",
       node_type: "send_buttons",
       config: {
-        text: "Please confirm — {{vars.guest_name}}, {{vars.party_size}} guests on {{vars.booking_date}} at {{vars.booking_time}}.",
+        text: "Please confirm — {{vars.guest_name}}, {{vars.party_size}} guests on {{vars.booking_date_label}} at {{vars.booking_time_label}}.",
         buttons: [
           { reply_id: "yes", title: "Confirm", next_node_key: "book" },
           { reply_id: "no", title: "Start over", next_node_key: "ask_party" },
@@ -562,8 +562,12 @@ const RESTAURANT_HUB: FlowTemplate = {
       node_key: "booked",
       node_type: "send_message",
       config: {
-        text: "🎉 You're booked, {{vars.guest_name}}! Table for {{vars.party_size}} on {{vars.booking_date}} at {{vars.booking_time}}. See you soon!",
-        next_node_key: "end",
+        // Loop back to the main menu instead of ending: after a booking
+        // the guest still has a live menu to tap (order, view menu,
+        // FAQ, or book again) rather than landing in a dead-end where
+        // tapping anything does nothing.
+        text: "🎉 You're booked, {{vars.guest_name}}! Table for {{vars.party_size}} on {{vars.booking_date_label}} at {{vars.booking_time_label}}. See you soon!\n\nAnything else?",
+        next_node_key: "main_menu",
       } as SendMessageNodeConfig,
     },
 
@@ -693,12 +697,6 @@ const RESTAURANT_HUB: FlowTemplate = {
       config: {
         note: "Guest asked to talk to a human from the FAQ menu.",
       } as HandoffNodeConfig,
-    },
-
-    {
-      node_key: "end",
-      node_type: "end",
-      config: {},
     },
   ],
 };

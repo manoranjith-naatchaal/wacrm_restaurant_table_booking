@@ -46,10 +46,12 @@ import {
   dateButtonLabel,
   DEFAULT_BOOKING_TIMEZONE,
   enumerateStartTimes,
+  formatLongDate,
   formatTime12,
   getAccountTimezone,
   getZonedNow,
   hasOpenTimeRemaining,
+  sampleEvenly,
   shortDayLabel,
 } from "./booking";
 import { getAccountAvailability } from "@/lib/reservations/booking-checks";
@@ -753,11 +755,14 @@ async function executeCheckAvailability(
     cfg.max_options && cfg.max_options > 0 ? cfg.max_options : 10,
     10,
   );
-  const times = enumerateStartTimes(
-    windows,
-    cfg.slot_interval_minutes,
-    notBefore,
-  ).slice(0, cap);
+  // Spread the offered times across the whole open window rather than
+  // taking the first `cap` — otherwise a wide window (e.g. 7am–10pm)
+  // would only ever surface the morning slots before hitting the 10-row
+  // WhatsApp list limit.
+  const times = sampleEvenly(
+    enumerateStartTimes(windows, cfg.slot_interval_minutes, notBefore),
+    cap,
+  );
   if (times.length === 0) {
     return noTimes();
   }
@@ -978,7 +983,16 @@ async function captureBookingVar(
   value: string,
   nextKey: string,
 ): Promise<string | null> {
-  const newVars = { ...run.vars, [varKey]: value };
+  // Store the raw value for downstream logic (create_reservation needs
+  // the ISO date / 24h time), plus a display-friendly `<var>_label`
+  // companion the confirm/booked messages can render — e.g.
+  // booking_date_label = "20-June-2026", booking_time_label = "7:00 PM".
+  const newVars: Record<string, unknown> = { ...run.vars, [varKey]: value };
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    newVars[`${varKey}_label`] = formatLongDate(value);
+  } else if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(value)) {
+    newVars[`${varKey}_label`] = formatTime12(value);
+  }
   const { error } = await db
     .from("flow_runs")
     .update({ vars: newVars, reprompt_count: 0 })
